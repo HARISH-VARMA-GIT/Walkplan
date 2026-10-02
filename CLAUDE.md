@@ -33,5 +33,12 @@ python measure_room.py ../../../data/single_room/<capture>            # -> room.
 
 - Always OOP.
 - Beginner-friendly: simple, readable code; beginner-friendly class/function/variable names.
-- Avoid heavy comments.
+- Avoid heavy comments. Do not write multi line comments
 - Use spaces/whitespace generously.
+- Keep OOP simple: plain classes, `__init__`, instance methods, basic inheritance. Avoid `@staticmethod`, `@classmethod`, `@contextmanager`, `@abstractmethod`/ABC, `@property`, and similar decorators. Base class stubs raise `NotImplementedError`.
+- No lambdas; use normal named functions/methods.
+- Functions returning LLM output return a plain dict keyed by name, e.g. `{"folder_path": folder_path, "analysis": analysis.model_dump()}`.
+
+## LLM Access
+
+`src/utils/llm_provider.py` is the single entry point for LLM calls. `LlmProviderFactory` picks the provider from `LLM_PROVIDER` (default `openai`); `LlmClient.run(llm_model_name, messages, output_model)` takes an LLM model name (pass `None` to use the fallback chain), messages and a pydantic schema, returns the structured result, and handles retry + model fallback using the `LLM_MODEL_CHAIN` env var; `VisionLimiter` caps concurrent vision calls (`LLM_VISION_MAX_CONCURRENT`). Add new providers as `LlmProvider` subclasses registered in the factory.

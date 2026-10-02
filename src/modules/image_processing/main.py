@@ -19,6 +19,7 @@ class ImageProcessingService:
             max_tokens=2048,
         )
         self.vision_limiter = VisionLimiter()
+        self.vision_model_name = os.getenv("VISION_MODEL_NAME")
 
     def process_image(self, folder_path: str) -> dict:
         image_paths = self.image_converter.list_image_paths(folder_path)
@@ -32,7 +33,7 @@ class ImageProcessingService:
         self.vision_limiter.acquire()
 
         try:
-            analysis = self.llm_client.run("gpt-4o", messages, RoomImageAnalysis)
+            analysis = self.llm_client.run(self.vision_model_name, messages, RoomImageAnalysis)
         finally:
             self.vision_limiter.release()
 
