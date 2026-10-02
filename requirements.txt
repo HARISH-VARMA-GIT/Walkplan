@@ -1,4 +1,11 @@
-open3d==0.19.0 
-opencv-python 
+open3d==0.19.0
+opencv-python
 numpy
 python-dotenv
+langchain
+langchain-openai
+langchain-core
+openai
+pydantic
+pillow
+pillow-heif
