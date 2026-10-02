@@ -1,0 +1,4 @@
+*.esx
+data/
+.venv/
+*__pycache__/*
