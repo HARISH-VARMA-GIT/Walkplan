@@ -1,0 +1,12 @@
+.git
+.venv
+**/.venv
+.cache
+output
+data
+src/inputs
+.env
+*.esx
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache

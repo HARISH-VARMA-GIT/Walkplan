@@ -1,0 +1,19 @@
+services:
+  walkplan:
+    build: .
+    image: walkplan
+    env_file: .env
+    volumes:
+      - ./src/inputs:/app/src/inputs
+      - ./output:/app/output
+      - model-cache:/app/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  model-cache:
