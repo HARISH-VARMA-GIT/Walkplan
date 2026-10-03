@@ -1,0 +1,10 @@
+{    
+    "Sintel": {
+        "path": "data/eval/Sintel",
+        "width": 872,
+        "height": 436,
+        "split": ".index.txt",
+        "segmentation": "segmentation.png",
+        "has_sharp_boundary": true
+    }
+}
