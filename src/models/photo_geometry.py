@@ -1,0 +1,91 @@
+from typing import Literal, Optional
+
+from pydantic import BaseModel
+
+
+Point2D = tuple[float, float]
+EndType = Literal["corner", "truncated", "occluded"]
+
+
+class PhotoWall(BaseModel):
+    letter: str
+    start: Point2D
+    end: Point2D
+    visible_length_m: float
+    start_type: EndType
+    end_type: EndType
+    distance_from_camera_m: float
+    visible_height_m: float
+    image_center_x: float
+    point_count: int
+
+
+class PhotoCorner(BaseModel):
+    number: int
+    wall_before: str
+    wall_after: str
+    point: Point2D
+    angle_deg: float
+    corner_type: Literal["normal", "protruding"]
+
+
+class PhotoOpening(BaseModel):
+    id: str
+    type: Literal["door", "window"]
+    wall_letter: Optional[str] = None
+    box: list[float]
+    score: float
+    start_along_wall_m: Optional[float] = None
+    width_m: Optional[float] = None
+    height_m: Optional[float] = None
+    sill_height_m: Optional[float] = None
+    looks_valid: bool = False
+
+
+class PhotoDamage(BaseModel):
+    damage_id: str
+    surface_type: Literal["wall", "floor", "ceiling"]
+    wall_letter: Optional[str] = None
+    box: list[float]
+    score: float
+    point: Optional[Point2D] = None
+    start_along_wall_m: Optional[float] = None
+    width_m: Optional[float] = None
+    center_height_m: Optional[float] = None
+    area_m2: Optional[float] = None
+    method: Literal["measured", "estimated", "assumed"] = "assumed"
+
+
+class PhotoGeometry(BaseModel):
+    photo_id: str
+    image_path: str
+    image_width: int
+    image_height: int
+    fov_x_deg: float
+    floor_found: bool
+    up_vector: list[float] = [0.0, -1.0, 0.0]
+    camera_height_m: Optional[float] = None
+    ceiling_height_m: Optional[float] = None
+    walls: list[PhotoWall] = []
+    corners: list[PhotoCorner] = []
+    openings: list[PhotoOpening] = []
+    damages: list[PhotoDamage] = []
+    notes: list[str] = []
+
+
+class RoomPhotoGeometry(BaseModel):
+    room_name: str
+    photos: list[PhotoGeometry]
+
+
+class PhotoPlacement(BaseModel):
+    photo_id: str
+    heading_deg: float
+    position: Point2D
+    depth_scale: float
+
+
+class RoomPlacements(BaseModel):
+    scale: float
+    wall_angle_deg: float
+    placements: list[PhotoPlacement]

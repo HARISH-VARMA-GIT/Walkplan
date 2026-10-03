@@ -1,0 +1,12 @@
+# Dependencies are declared in pyproject.toml, which is the single source of truth.
+# This file exists so that `pip install -r requirements.txt` keeps working.
+#
+# pip does not read uv's index configuration, so it takes whatever PyTorch build
+# PyPI currently serves. Pass the index you want explicitly:
+#   pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu130
+#   pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu128
+#
+# This installs the base package, which covers inference for all model versions.
+# The training dependencies live in the  `train` extras -- 
+# see the installation section in README.md.
+-e .

@@ -1,0 +1,9 @@
+{
+    "DDAD": {
+        "path": "data/eval/DDAD",
+        "width": 1400,
+        "height": 700,
+        "segmentation": "segmentation.png",
+        "split": ".index.txt"
+    }
+}

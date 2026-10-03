@@ -1,0 +1,23 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+open3d==0.19.0
+opencv-python-headless==4.10.0.84
+numpy
+scipy
+python-dotenv
+langchain
+langchain-openai
+langchain-core
+openai
+pydantic
+pillow
+pillow-heif
+
+torch>=2.4
+torchvision>=0.19
+transformers>=5
+huggingface_hub>=1.33
+
+-e ./src/MoGe
+mapanything @ git+https://github.com/facebookresearch/map-anything.git
+imageio-ffmpeg

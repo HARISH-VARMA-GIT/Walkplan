@@ -1,0 +1,7 @@
+*.esx
+data/
+.venv/
+__pycache__/
+.env
+output/
+.cache/
