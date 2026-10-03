@@ -17,3 +17,11 @@
         The legality of reverse engineering a file format for the sole purpose of interoperability—enabling your independent software program to output files compatible with another platform—is a well-established legal principle, particularly under United States law
 
         You are not copying Xactimate's proprietary source code, bypassing their DRM (Digital Rights Management) to steal the software, or cloning their app. 
+
+
+-------------------------------------
+
+1) MoGe: Accurate Monocular Geometry Estimation --- Creates the mesh,point cloud,depth
+
+2) Grounding dino sam --  Detects the objecs and masks
+    One can combine Grounding DINO with the Segment Anything model for text-based mask generation as introduced in Grounded SAM: Assembling Open-World Models for Diverse Visual Tasks. 
