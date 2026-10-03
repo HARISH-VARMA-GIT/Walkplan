@@ -22,6 +22,8 @@ SAME_OPENING_M = 0.5
 MIN_END_LINE_LENGTH_M = 1.0
 END_LINE_MIN_GAP_M = 0.35
 MIN_EDGE_LENGTH_M = 0.2
+MAX_JOG_LENGTH_M = 0.6
+MAX_JOG_AREA_M2 = 0.3
 
 AXES = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 AXIS_NAMES = {(1, 0): "east", (-1, 0): "west", (0, 1): "north", (0, -1): "south"}
@@ -482,7 +484,103 @@ class GeometryLayoutBuilder:
             raise ValueError("Could not find the room floor area between the walls")
 
         corners = self.trace_outline(inside)
+        corners = self.simplify_outline(corners, xs, ys)
         return self.build_edges(corners, xs, ys)
+
+    def corner_point(self, corner: tuple, xs: list, ys: list) -> np.ndarray:
+        return np.array([xs[corner[0]], ys[corner[1]]])
+
+    def edge_length(self, corners: list, index: int, xs: list, ys: list) -> float:
+        start = self.corner_point(corners[index % len(corners)], xs, ys)
+        end = self.corner_point(corners[(index + 1) % len(corners)], xs, ys)
+        return float(np.abs(end - start).sum())
+
+    def move_edge(self, corners: list, index: int, target: tuple) -> list:
+        count = len(corners)
+        moved = list(corners)
+        first = index % count
+        second = (index + 1) % count
+
+        if corners[first][0] == corners[second][0]:
+            moved[first] = (target[0], corners[first][1])
+            moved[second] = (target[0], corners[second][1])
+        else:
+            moved[first] = (corners[first][0], target[1])
+            moved[second] = (corners[second][0], target[1])
+
+        return moved
+
+    def clean_corners(self, corners: list) -> list:
+        changed = True
+        while changed and len(corners) >= 4:
+            changed = False
+
+            unique = []
+            for corner in corners:
+                if not unique or unique[-1] != corner:
+                    unique.append(corner)
+            if len(unique) > 1 and unique[0] == unique[-1]:
+                unique.pop()
+
+            cleaned = self.remove_straight_points(unique)
+            if cleaned != corners:
+                changed = True
+            corners = cleaned
+
+        return corners
+
+    def jog_options(self, corners: list, index: int, xs: list, ys: list) -> list:
+        count = len(corners)
+        before = corners[(index - 1) % count]
+        start = corners[index % count]
+        end = corners[(index + 1) % count]
+        after = corners[(index + 2) % count]
+
+        length = self.edge_length(corners, index, xs, ys)
+        before_length = self.edge_length(corners, index - 1, xs, ys)
+        after_length = self.edge_length(corners, index + 1, xs, ys)
+
+        first_direction = self.corner_point(start, xs, ys) - self.corner_point(before, xs, ys)
+        second_direction = self.corner_point(after, xs, ys) - self.corner_point(end, xs, ys)
+        is_step = float(first_direction @ second_direction) > 0
+
+        if is_step:
+            return [
+                {"area": length * before_length, "corners": self.move_edge(corners, index - 1, end)},
+                {"area": length * after_length, "corners": self.move_edge(corners, index + 1, start)},
+            ]
+
+        return [
+            {"area": length * before_length, "corners": self.move_edge(corners, index, before)},
+            {"area": length * after_length, "corners": self.move_edge(corners, index, after)},
+        ]
+
+    def area_of(self, option: dict) -> float:
+        return option["area"]
+
+    def simplify_outline(self, corners: list, xs: list, ys: list) -> list:
+        removed = 0
+
+        while len(corners) > 4:
+            best = None
+            for index in range(len(corners)):
+                if self.edge_length(corners, index, xs, ys) > MAX_JOG_LENGTH_M:
+                    continue
+
+                for option in self.jog_options(corners, index, xs, ys):
+                    if option["area"] < MAX_JOG_AREA_M2 and (best is None or option["area"] < best["area"]):
+                        best = option
+
+            if best is None:
+                break
+
+            corners = self.clean_corners(best["corners"])
+            removed += 1
+
+        if removed:
+            self.notes.append(f"removed {removed} small jogs from the outline")
+
+        return corners
 
     def build_layout(self, photo_set: RoomPhotoGeometry, placements: RoomPlacements, room_type: str = "other") -> RoomLayout:
         self.notes = []

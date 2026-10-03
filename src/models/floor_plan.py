@@ -50,10 +50,20 @@ class Damage(BaseModel):
     surface_type: Literal["wall", "floor", "ceiling"]
     wall_id: Optional[str] = None  # set when surface_type == "wall"
     damage_class: Literal["water_stain", "mold", "crack", "hole", "burn", "peeling", "other"]
-    extent_m2: Measurement
+    extent_m2: Optional[Measurement] = None
     confidence: float = Field(ge=0, le=1)
     concealed_flag: Optional[str] = None  # rule that fired if hidden damage is suspected
     notes: Optional[str] = None
+    offset_m: Optional[float] = None  # distance along the wall from wall.start to the damage centre
+    width_m: Optional[float] = None
+    height_m: Optional[float] = None  # damage centre above the floor
+    point: Optional[Point] = None  # damage centre in the plan frame
+    severity: Optional[Literal["minor", "moderate", "severe", "unknown"]] = None
+    description: Optional[str] = None
+    quote: Optional[str] = None  # what the speaker said
+    video_time_s: Optional[float] = None
+    source_frames: list[str] = []
+    location_method: Literal["measured", "estimated", "assumed"] = "assumed"
 
 
 class Room(BaseModel):

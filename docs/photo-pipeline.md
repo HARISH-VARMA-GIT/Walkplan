@@ -106,10 +106,11 @@ Schemas: `src/models/photo_geometry.py` (per-photo results, placements), `src/mo
 3. **Grid.** Grid lines are drawn at every wall line, and also where long clusters end. That is how steps and alcoves get their own cells even when their short side face was never photographed.
 4. **Free-space carving.** For every visible wall point, the line of sight from the camera to it (stopping 30 cm short) marks the grid cells it crosses as "inside". Cells with few hits compared to the typical cell are ignored (noise).
 5. **Outline.** Keep the biggest inside region, fill holes, trace its border clockwise, and merge straight runs into walls W1…Wn. W1 is the top wall. Each corner is `normal` (right turn) or `protruding` (left turn).
-6. **Matching.** Each photo wall is matched to the outline wall with the same direction, close position and overlapping extent. Doors and windows seen in several photos are merged by position along their wall (within 0.5 m).
-7. **Solve.** `WallPositionSolver` finds every wall position and camera position by least squares. Inputs: camera-to-wall distances, MapAnything headings (fixed), MapAnything positions (soft, ±0.3 m), outline positions (weak, ±0.5 m, only matters for walls nobody saw), and "visible wall ends must be inside the room" (only at normal corners). Outliers are dropped. Length ± comes from the solver; `method` is `measured` if the wall and both neighbours were seen.
+6. **Clean-up.** A short wall (≤ 0.6 m) is removed when that changes the floor area by less than 0.3 m², either by moving a neighbour wall onto the next line (a step) or by filling a notch. Noisy poses cause these slivers; real steps like room1's 0.43 m one (about 0.7 m²) stay.
+7. **Matching.** Each photo wall is matched to the outline wall with the same direction, close position and overlapping extent. Doors and windows seen in several photos are merged by position along their wall (within 0.5 m).
+8. **Solve.** `WallPositionSolver` finds every wall position and camera position by least squares. Inputs: camera-to-wall distances, MapAnything headings (fixed), MapAnything positions (soft, ±0.3 m), outline positions (weak, ±0.5 m, only matters for walls nobody saw), and "visible wall ends must be inside the room" (only at normal corners). Outliers are dropped. Length ± comes from the solver; `method` is `measured` if the wall and both neighbours were seen.
 
-Tested on a synthetic L-shaped room with 6 walls (5, 2, 2, 2, 3, 4 m): every wall was recovered within about 0.1 m, even with 20 cm noise on camera positions.
+Tested on a synthetic L-shaped room with 6 walls (5, 2, 2, 2, 3, 4 m): with up to 10 cm noise on camera positions every wall comes back within about 0.1 m. With 20–30 cm noise the shape is still 6 walls, but lengths can be off by 0.5 m or more.
 
 ---
 

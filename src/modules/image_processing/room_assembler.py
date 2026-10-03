@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from models.floor_plan import Measurement, Opening, Room, Wall
+from models.floor_plan import Damage, Measurement, Opening, Room, Wall
 from models.image_models import RoomLayout
 from models.photo_geometry import RoomPhotoGeometry
 from modules.image_processing.wall_position_solver import WallPositionSolver
@@ -15,6 +15,8 @@ MIN_VOTE_LENGTH_M = 0.3
 HEADING_AGREEMENT_DEG = 20
 MATCH_ANGLE_DEG = 25
 SOURCE = "moge2_photo"
+DAMAGE_AREA_RELATIVE_ERROR = 0.5
+DAMAGE_CONFIDENCE = {"measured": 0.7, "estimated": 0.5, "assumed": 0.3}
 
 
 class RoomAssembler:
@@ -325,7 +327,179 @@ class RoomAssembler:
 
         return self.interval(heights, 0.05)
 
-    def assemble(self, photo_set: RoomPhotoGeometry, layout: RoomLayout, placements=None) -> dict:
+    def room_point(self, photo_id: str, point, solver: WallPositionSolver, placements):
+        if photo_id in solver.poses and solver.poses[photo_id].position is not None:
+            return solver.poses[photo_id].to_room(point)
+
+        if placements is None:
+            return None
+
+        for placement in placements.placements:
+            if placement.photo_id == photo_id:
+                heading = math.radians(placement.heading_deg)
+                x, y = point
+                rotated = np.array([math.cos(heading) * x - math.sin(heading) * y, math.sin(heading) * x + math.cos(heading) * y])
+                return np.array(placement.position) + rotated
+
+        return None
+
+    def closest_wall(self, room_point, walls: list) -> int:
+        best_index = 0
+        best_distance = None
+
+        for index, wall in enumerate(walls):
+            start = np.array(wall.start)
+            direction = np.array(wall.end) - start
+            length = max(float(np.linalg.norm(direction)), 1e-6)
+            along = float(np.clip((room_point - start) @ direction / length, 0, length))
+            distance = float(np.linalg.norm(start + direction / length * along - room_point))
+
+            if best_distance is None or distance < best_distance:
+                best_index = index
+                best_distance = distance
+
+        return best_index
+
+    def collect_photo_damages(self, photo_set: RoomPhotoGeometry) -> dict:
+        found = {}
+        for photo in photo_set.photos:
+            for damage in photo.damages:
+                found.setdefault(damage.damage_id, []).append((photo, damage))
+        return found
+
+    def build_damages(self, photo_set: RoomPhotoGeometry, damage_details: dict, matches: dict,
+                      solver: WallPositionSolver, walls: list, placements) -> list:
+        photo_damages = self.collect_photo_damages(photo_set)
+        damage_ids = list(damage_details.keys())
+        for damage_id in photo_damages:
+            if damage_id not in damage_ids:
+                damage_ids.append(damage_id)
+
+        damages = []
+        for damage_id in damage_ids:
+            details = damage_details.get(damage_id, {})
+            damages.append(self.build_one_damage(damage_id, details, photo_damages.get(damage_id, []), matches, solver, walls, placements))
+
+        return damages
+
+    def build_one_damage(self, damage_id: str, details: dict, items: list, matches: dict,
+                         solver: WallPositionSolver, walls: list, placements) -> Damage:
+        damage = Damage(
+            id=damage_id,
+            surface_type="wall",
+            damage_class=details.get("damage_class", "other"),
+            confidence=0.2,
+            severity=details.get("severity"),
+            description=details.get("description"),
+            quote=details.get("quote"),
+            notes=details.get("location") or None,
+            video_time_s=details.get("start_seconds"),
+            source_frames=details.get("source_frames", []),
+        )
+
+        if details.get("surface_type") in ["floor", "ceiling"]:
+            damage.surface_type = details["surface_type"]
+
+        by_method = {"measured": [], "estimated": [], "assumed": []}
+        for photo, item in items:
+            if item.point is not None:
+                by_method[item.method].append((photo, item))
+
+        method = None
+        for name in ["measured", "estimated", "assumed"]:
+            if method is None and by_method[name]:
+                method = name
+
+        if method is None:
+            self.notes.append(f"{damage_id}: damage not found in any frame, position unknown")
+            return damage
+
+        usable = by_method[method]
+        damage.location_method = method
+        damage.confidence = DAMAGE_CONFIDENCE[method]
+
+        surface_counts = {}
+        for photo, item in usable:
+            surface_counts[item.surface_type] = surface_counts.get(item.surface_type, 0) + 1
+        damage.surface_type = max(surface_counts, key=surface_counts.get)
+
+        on_surface = []
+        room_points = []
+        wall_votes = {}
+        for photo, item in usable:
+            if item.surface_type != damage.surface_type:
+                continue
+
+            room_point = self.room_point(photo.photo_id, item.point, solver, placements)
+            if room_point is None:
+                continue
+
+            on_surface.append(item)
+            room_points.append(room_point)
+
+            wall_id = matches.get((photo.photo_id, item.wall_letter))
+            if wall_id is not None:
+                wall_votes[wall_id] = wall_votes.get(wall_id, 0) + 1
+
+        if not room_points:
+            self.notes.append(f"{damage_id}: frames have no camera position, position unknown")
+            return damage
+
+        centre = np.median(np.array(room_points), axis=0)
+
+        if damage.surface_type == "wall":
+            centre = self.place_on_wall(damage, centre, wall_votes, walls)
+
+        damage.point = (round(float(centre[0]), 3), round(float(centre[1]), 3))
+
+        heights = [item.center_height_m for item in on_surface if item.center_height_m is not None]
+        if heights:
+            damage.height_m = round(float(np.median(heights)), 3)
+
+        widths = [item.width_m for item in on_surface if item.width_m is not None]
+        if widths:
+            damage.width_m = round(float(np.median(widths)), 3)
+
+        areas = [item.area_m2 for item in on_surface if item.area_m2 is not None]
+        if areas:
+            area = float(np.median(areas))
+            damage.extent_m2 = Measurement(
+                value=round(area, 3),
+                low=round(area * (1 - DAMAGE_AREA_RELATIVE_ERROR), 3),
+                high=round(area * (1 + DAMAGE_AREA_RELATIVE_ERROR), 3),
+                method=method,
+                source=SOURCE,
+            )
+
+        if method != "measured":
+            self.notes.append(f"{damage_id}: damage outline not detected, position {method} from the frame")
+
+        return damage
+
+    def place_on_wall(self, damage: Damage, centre, wall_votes: dict, walls: list):
+        wall_index = None
+        if wall_votes:
+            best_wall_id = max(wall_votes, key=wall_votes.get)
+            for index, wall in enumerate(walls):
+                if wall.id == best_wall_id:
+                    wall_index = index
+
+        if wall_index is None:
+            wall_index = self.closest_wall(centre, walls)
+
+        wall = walls[wall_index]
+        start = np.array(wall.start)
+        direction = np.array(wall.end) - start
+        length = max(float(np.linalg.norm(direction)), 1e-6)
+        direction = direction / length
+
+        offset = float(np.clip((centre - start) @ direction, 0, length))
+        damage.wall_id = wall.id
+        damage.offset_m = round(offset, 3)
+
+        return start + direction * offset
+
+    def assemble(self, photo_set: RoomPhotoGeometry, layout: RoomLayout, placements=None, damage_details: dict = None) -> dict:
         self.notes = []
 
         if len(layout.walls) < 3:
@@ -361,6 +535,7 @@ class RoomAssembler:
             walls=walls,
             openings=openings,
             ceiling_height=self.build_ceiling(photo_set),
+            damage=self.build_damages(photo_set, damage_details or {}, matches, solver, walls, placements),
         )
 
         matches_used = []

@@ -42,6 +42,20 @@ class PhotoOpening(BaseModel):
     looks_valid: bool = False
 
 
+class PhotoDamage(BaseModel):
+    damage_id: str
+    surface_type: Literal["wall", "floor", "ceiling"]
+    wall_letter: Optional[str] = None
+    box: list[float]
+    score: float
+    point: Optional[Point2D] = None
+    start_along_wall_m: Optional[float] = None
+    width_m: Optional[float] = None
+    center_height_m: Optional[float] = None
+    area_m2: Optional[float] = None
+    method: Literal["measured", "estimated", "assumed"] = "assumed"
+
+
 class PhotoGeometry(BaseModel):
     photo_id: str
     image_path: str
@@ -55,6 +69,7 @@ class PhotoGeometry(BaseModel):
     walls: list[PhotoWall] = []
     corners: list[PhotoCorner] = []
     openings: list[PhotoOpening] = []
+    damages: list[PhotoDamage] = []
     notes: list[str] = []
 
 

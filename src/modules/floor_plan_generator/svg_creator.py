@@ -15,11 +15,16 @@ DAMAGE_COLOR = "#D9480F"
 DIM_COLOR = "#C0392B"
 WALL_COLOR = "#2B2B2B"
 WINDOW_COLOR = "#3A7BD5"
+DAMAGE_INWARD_M = 0.3
+LEGEND_MIN_WIDTH_PX = 760
+LEGEND_TITLE_PX = 26
+LEGEND_ROW_PX = 18
+MARKER_SPACING_PX = 24
 
 
 class Canvas:
 
-    def __init__(self, plan: FloorPlan, geometry: FloorPlanGeometry):
+    def __init__(self, plan: FloorPlan, geometry: FloorPlanGeometry, legend_rows: int = 0):
         xs = []
         ys = []
 
@@ -31,7 +36,12 @@ class Canvas:
         self.min_x = min(xs) - MARGIN_M
         self.max_y = max(ys) + MARGIN_M
         self.width = (max(xs) - min(xs) + 2 * MARGIN_M) * PX_PER_M
-        self.height = (max(ys) - min(ys) + 2 * MARGIN_M) * PX_PER_M + TITLE_HEIGHT_PX
+        self.plan_bottom = (max(ys) - min(ys) + 2 * MARGIN_M) * PX_PER_M + TITLE_HEIGHT_PX
+        self.height = self.plan_bottom
+
+        if legend_rows > 0:
+            self.width = max(self.width, LEGEND_MIN_WIDTH_PX)
+            self.height = self.plan_bottom + LEGEND_TITLE_PX + legend_rows * LEGEND_ROW_PX + 10
 
     def to_screen(self, x: float, y: float) -> tuple:
         screen_x = (x - self.min_x) * PX_PER_M
@@ -278,27 +288,102 @@ class SvgCreator:
             f'fill="none" stroke="{WALL_COLOR}" stroke-width="1" stroke-dasharray="4 3"/>',
         ]
 
-    def draw_damage(self, canvas: Canvas, room: Room, damage) -> str:
-        tip = (f"{damage.damage_class} on {damage.surface_type} {damage.wall_id or ''}: "
-               f"{damage.extent_m2.value:.2f} m² (conf {damage.confidence:.0%})")
+    def damage_place_text(self, damage) -> str:
+        if damage.surface_type == "wall" and damage.wall_id is not None:
+            text = f"wall {damage.wall_id}"
+            if damage.offset_m is not None:
+                text += f", {damage.offset_m:.2f} m from start"
+        else:
+            text = damage.surface_type
 
+        if damage.height_m is not None and damage.surface_type == "wall":
+            text += f", {damage.height_m:.2f} m high"
+
+        return text
+
+    def damage_size_text(self, damage) -> str:
+        parts = []
+        if damage.width_m is not None:
+            parts.append(f"~{damage.width_m:.2f} m wide")
+        if damage.extent_m2 is not None and damage.extent_m2.value >= 0.01:
+            parts.append(f"~{damage.extent_m2.value:.2f} m²")
+        return ", ".join(parts)
+
+    def damage_marker_point(self, room: Room, damage) -> tuple:
         wall = None
         for candidate in room.walls:
             if candidate.id == damage.wall_id:
                 wall = candidate
 
-        if damage.surface_type == "wall" and wall is not None:
+        if damage.surface_type == "wall" and wall is not None and damage.offset_m is not None:
+            dir_x, dir_y = self.wall_direction(wall)
             out_x, out_y = self.outward_normal(room, wall)
-            mid_x = (wall.start[0] + wall.end[0]) / 2
-            mid_y = (wall.start[1] + wall.end[1]) / 2
-            x, y = canvas.to_screen(mid_x - out_x * 0.15, mid_y - out_y * 0.15)
-        else:
-            centre_x, centre_y = self.polygon_centre(room)
-            x, y = canvas.to_screen(centre_x, centre_y - 0.5)
+            inward = wall.thickness_m / 2 + DAMAGE_INWARD_M
+            x = wall.start[0] + dir_x * damage.offset_m - out_x * inward
+            y = wall.start[1] + dir_y * damage.offset_m - out_y * inward
+            return x, y
 
-        return (f'<g data-damage="{damage.id}" data-class="{damage.damage_class}"><title>{escape(tip)}</title>'
-                f'<circle cx="{x}" cy="{y}" r="9" fill="{DAMAGE_COLOR}" fill-opacity="0.85"/>'
-                f'<text x="{x}" y="{y + 4}" text-anchor="middle" font-size="11" fill="white" font-weight="bold">!</text></g>')
+        if damage.point is not None:
+            return damage.point
+
+        centre_x, centre_y = self.polygon_centre(room)
+        return centre_x, centre_y - 0.5
+
+    def free_marker_spot(self, x: float, y: float, placed: list) -> tuple:
+        for step in range(12):
+            angle = step * math.pi / 3
+            radius = 0 if step == 0 else MARKER_SPACING_PX * (1 + (step - 1) // 6)
+            spot_x = round(x + radius * math.cos(angle), 1)
+            spot_y = round(y + radius * math.sin(angle), 1)
+
+            is_free = True
+            for other_x, other_y in placed:
+                if math.hypot(spot_x - other_x, spot_y - other_y) < MARKER_SPACING_PX:
+                    is_free = False
+
+            if is_free:
+                return spot_x, spot_y
+
+        return x, y
+
+    def draw_damage(self, canvas: Canvas, room: Room, damage, placed: list) -> str:
+        tip = f"{damage.id} {damage.damage_class.replace('_', ' ')}: {self.damage_place_text(damage)}"
+        if damage.description:
+            tip += f" | {damage.description}"
+
+        x, y = canvas.to_screen(*self.damage_marker_point(room, damage))
+        x, y = self.free_marker_spot(x, y, placed)
+        placed.append((x, y))
+        dashed = ' stroke="white" stroke-dasharray="3 2"' if damage.location_method != "measured" else ""
+
+        return (f'<g data-damage="{damage.id}" data-class="{damage.damage_class}" data-surface="{damage.surface_type}" '
+                f'data-method="{damage.location_method}"><title>{escape(tip)}</title>'
+                f'<circle cx="{x}" cy="{y}" r="11" fill="{DAMAGE_COLOR}" fill-opacity="0.9"{dashed}/>'
+                f'<text x="{x}" y="{y + 4}" text-anchor="middle" font-size="10" fill="white" font-weight="bold">{escape(damage.id)}</text></g>')
+
+    def draw_damage_legend(self, canvas: Canvas, plan: FloorPlan) -> str:
+        rows = []
+        y = canvas.plan_bottom + LEGEND_TITLE_PX - 8
+        rows.append(f'<text x="12" y="{y}" font-size="13" font-weight="600" fill="{DAMAGE_COLOR}">Damage</text>')
+
+        for room in plan.rooms:
+            for damage in room.damage:
+                y += LEGEND_ROW_PX
+                parts = [f"{damage.id}", damage.damage_class.replace("_", " "), self.damage_place_text(damage)]
+
+                size = self.damage_size_text(damage)
+                if size:
+                    parts.append(size)
+                if damage.severity and damage.severity != "unknown":
+                    parts.append(damage.severity)
+                if damage.description:
+                    parts.append(damage.description)
+                if damage.location_method != "measured":
+                    parts.append(f"position {damage.location_method}")
+
+                rows.append(f'<text x="12" y="{y}" font-size="11" fill="#1F2D3D">{escape(" · ".join(parts))}</text>')
+
+        return f'<g id="damage-legend">{"".join(rows)}</g>'
 
     def draw_label(self, canvas: Canvas, room: Room) -> str:
         centre_x, centre_y = self.polygon_centre(room)
@@ -319,7 +404,7 @@ class SvgCreator:
                 f'<text x="{x}" y="{y + 18}" text-anchor="middle" font-size="12" fill="#4A5868">{escape(subtitle)}</text></g>')
 
     def draw_scale_bar(self, canvas: Canvas) -> str:
-        start = (20, canvas.height - 20)
+        start = (20, canvas.plan_bottom - 20)
         end = (start[0] + PX_PER_M, start[1])
 
         return (f'<g id="scale"><line x1="{start[0]}" y1="{start[1]}" x2="{end[0]}" y2="{end[1]}" stroke="{WALL_COLOR}" stroke-width="3"/>'
@@ -331,8 +416,13 @@ class SvgCreator:
                 f'{escape(plan.capture.id)} · tier: {plan.capture.tier} · total {total:.1f} m²</text>')
 
     def create_svg(self, plan: FloorPlan) -> str:
-        canvas = Canvas(plan, self.geometry)
+        damage_count = 0
+        for room in plan.rooms:
+            damage_count += len(room.damage)
+
+        canvas = Canvas(plan, self.geometry, damage_count)
         drawn_doors = set()
+        placed_markers = []
 
         rooms = []
         walls = []
@@ -352,7 +442,7 @@ class SvgCreator:
                 openings.append(self.draw_opening(canvas, room, opening, drawn_doors))
 
             for damage in room.damage:
-                damages.append(self.draw_damage(canvas, room, damage))
+                damages.append(self.draw_damage(canvas, room, damage, placed_markers))
 
             labels.append(self.draw_label(canvas, room))
 
@@ -366,6 +456,9 @@ class SvgCreator:
             self.draw_scale_bar(canvas),
             self.draw_header(plan),
         ])
+
+        if damage_count > 0:
+            body += "\n" + self.draw_damage_legend(canvas, plan)
 
         return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas.width:.0f}" height="{canvas.height:.0f}" '
                 f'viewBox="0 0 {canvas.width:.0f} {canvas.height:.0f}" font-family="Helvetica, Arial, sans-serif" '

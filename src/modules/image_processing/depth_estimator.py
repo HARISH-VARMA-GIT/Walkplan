@@ -32,7 +32,7 @@ class DepthEstimator:
         self.model = None
         torch.cuda.empty_cache()
 
-    def estimate(self, image_rgb: np.ndarray) -> dict:
+    def estimate(self, image_rgb: np.ndarray, fov_x_deg: float = None) -> dict:
         import torch
 
         self.load_model()
@@ -40,7 +40,7 @@ class DepthEstimator:
         image_tensor = torch.tensor(image_rgb / 255, dtype=torch.float32, device=self.device).permute(2, 0, 1)
 
         with torch.no_grad():
-            output = self.model.infer(image_tensor)
+            output = self.model.infer(image_tensor, fov_x=fov_x_deg)
 
         result = {
             "points": output["points"].cpu().numpy(),
@@ -53,20 +53,23 @@ class DepthEstimator:
 
         return result
 
-    def estimate_with_cache(self, image_rgb: np.ndarray, cache_path: str, source_name: str = "") -> dict:
+    def estimate_with_cache(self, image_rgb: np.ndarray, cache_path: str, source_name: str = "", fov_x_deg: float = None) -> dict:
+        wanted_fov = -1.0 if fov_x_deg is None else round(float(fov_x_deg), 2)
+
         if os.path.exists(cache_path):
             saved = np.load(cache_path)
             saved_name = str(saved["source_name"]) if "source_name" in saved.files else ""
+            saved_fov = float(saved["given_fov_x_deg"]) if "given_fov_x_deg" in saved.files else -1.0
 
-            if saved_name == source_name and saved["points"].shape[:2] == image_rgb.shape[:2]:
+            if saved_name == source_name and saved_fov == wanted_fov and saved["points"].shape[:2] == image_rgb.shape[:2]:
                 result = {}
                 for key in saved.files:
-                    if key != "source_name":
+                    if key not in ["source_name", "given_fov_x_deg"]:
                         result[key] = saved[key]
                 return result
 
-        result = self.estimate(image_rgb)
+        result = self.estimate(image_rgb, fov_x_deg)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.savez_compressed(cache_path, source_name=np.array(source_name), **result)
+        np.savez_compressed(cache_path, source_name=np.array(source_name), given_fov_x_deg=np.array(wanted_fov), **result)
 
         return result
