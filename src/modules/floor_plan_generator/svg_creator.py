@@ -1,200 +1,339 @@
-"""Render a FloorPlan to SVG (no dependencies beyond the schema).
-
-Layers (draw order, OAS-style):  rooms -> walls -> openings -> damage -> dimensions -> labels
-Every element carries data-* attributes and a <title> tooltip, so the SVG stays tied to the JSON.
-
-CLI:  python -m tapeless.cli render plan.json [--png plan.png]
-"""
-from __future__ import annotations
-
-import argparse
 import math
 from html import escape
 
 from models.floor_plan import FloorPlan, Measurement, Room, Wall
+from utils.geometry import FloorPlanGeometry
+
 
 PX_PER_M = 100
 MARGIN_M = 1.0
+TITLE_HEIGHT_PX = 40
 DIM_OFFSET_M = 0.35
 ROOM_FILLS = ["#EAF2FB", "#EEF7EC", "#FBF1E6", "#F3ECF8", "#E9F6F6", "#FBEFF1"]
 DAMAGE_COLOR = "#D9480F"
+DIM_COLOR = "#C0392B"
+WALL_COLOR = "#2B2B2B"
+WINDOW_COLOR = "#3A7BD5"
 
 
-def _fmt(m: Measurement | None, fallback: float | None = None) -> str:
-    if m is None:
-        return f"{fallback:.2f} m" if fallback is not None else "n/a"
-    return f"{m.value:.2f} ±{m.half_width:.2f} m" if m.half_width >= 0.005 else f"{m.value:.2f} m"
+class Canvas:
+
+    def __init__(self, plan: FloorPlan, geometry: FloorPlanGeometry):
+        xs = []
+        ys = []
+
+        for room in plan.rooms:
+            for x, y in geometry.room_polygon(room):
+                xs.append(x)
+                ys.append(y)
+
+        self.min_x = min(xs) - MARGIN_M
+        self.max_y = max(ys) + MARGIN_M
+        self.width = (max(xs) - min(xs) + 2 * MARGIN_M) * PX_PER_M
+        self.height = (max(ys) - min(ys) + 2 * MARGIN_M) * PX_PER_M + TITLE_HEIGHT_PX
+
+    def to_screen(self, x: float, y: float) -> tuple:
+        screen_x = (x - self.min_x) * PX_PER_M
+        screen_y = (self.max_y - y) * PX_PER_M + TITLE_HEIGHT_PX
+        return round(screen_x, 1), round(screen_y, 1)
 
 
-class _Canvas:
-    def __init__(self, plan: FloorPlan):
-        xs = [p[0] for r in plan.rooms for p in r.polygon]
-        ys = [p[1] for r in plan.rooms for p in r.polygon]
-        self.minx, self.maxy = min(xs) - MARGIN_M, max(ys) + MARGIN_M
-        self.w = (max(xs) - min(xs) + 2 * MARGIN_M) * PX_PER_M
-        self.h = (max(ys) - min(ys) + 2 * MARGIN_M) * PX_PER_M + 40  # + title strip
+class SvgCreator:
 
-    def pt(self, x: float, y: float) -> tuple[float, float]:  # plan (y up) -> screen (y down)
-        return round((x - self.minx) * PX_PER_M, 1), round((self.maxy - y) * PX_PER_M + 40, 1)
+    def __init__(self):
+        self.geometry = FloorPlanGeometry()
 
+    def format_length(self, measurement: Measurement, fallback: float = None) -> str:
+        if measurement is None:
+            if fallback is None:
+                return "n/a"
+            return f"{fallback:.2f} m"
 
-def _unit(w: Wall):
-    (x1, y1), (x2, y2) = w.start, w.end
-    L = math.hypot(x2 - x1, y2 - y1) or 1.0
-    return (x2 - x1) / L, (y2 - y1) / L
+        half_width = self.geometry.half_width(measurement)
 
+        if half_width >= 0.005:
+            return f"{measurement.value:.2f} ±{half_width:.2f} m"
 
-def _outward(room: Room, w: Wall):
-    ux, uy = _unit(w)
-    # for a CCW room the interior is on the left, so outward is the right-hand normal
-    return (uy, -ux) if room.is_ccw else (-uy, ux)
+        return f"{measurement.value:.2f} m"
 
+    def wall_direction(self, wall: Wall) -> tuple:
+        (x1, y1), (x2, y2) = wall.start, wall.end
+        length = math.hypot(x2 - x1, y2 - y1) or 1.0
+        return (x2 - x1) / length, (y2 - y1) / length
 
-def _inside(pt, poly) -> bool:
-    x, y = pt; ins = False
-    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
-        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
-            ins = not ins
-    return ins
+    def outward_normal(self, room: Room, wall: Wall) -> tuple:
+        dx, dy = self.wall_direction(wall)
 
+        if self.geometry.is_counter_clockwise(room):
+            return dy, -dx
 
-def _is_shared(plan: FloorPlan, room: Room, w: Wall) -> bool:
-    """True if just beyond this wall's outer face lies another room (an interior partition)."""
-    ox, oy = _outward(room, w)
-    mx, my = (w.start[0] + w.end[0]) / 2, (w.start[1] + w.end[1]) / 2
-    probe = (mx + ox * (w.thickness_m + 0.05), my + oy * (w.thickness_m + 0.05))
-    return any(r.id != room.id and _inside(probe, r.polygon) for r in plan.rooms)
+        return -dy, dx
 
+    def is_point_inside(self, point: tuple, polygon: list) -> bool:
+        x, y = point
+        inside = False
 
-def _shares(other: Room, w: Wall, room: Room) -> bool:
-    if other.id == room.id:
-        return True
-    ox, oy = _outward(room, w)
-    mx, my = (w.start[0] + w.end[0]) / 2, (w.start[1] + w.end[1]) / 2
-    return _inside((mx + ox * (w.thickness_m + 0.05), my + oy * (w.thickness_m + 0.05)), other.polygon)
+        for index in range(len(polygon)):
+            x1, y1 = polygon[index]
+            x2, y2 = polygon[(index + 1) % len(polygon)]
 
+            if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+                inside = not inside
 
-def render_svg(plan: FloorPlan) -> str:
-    c = _Canvas(plan)
-    drawn_doors: set[frozenset] = set()  # a door between R1 and R2 is listed in both rooms; draw its leaf once
-    rooms, walls, openings, damage, dims, labels = [], [], [], [], [], []
+        return inside
 
-    for k, r in enumerate(plan.rooms):
-        pts = " ".join(f"{x},{y}" for x, y in (c.pt(*p) for p in r.polygon))
-        tip = f"{r.name or r.label} ({r.id}) | area {r.geometric_area:.2f} m² | ceiling {_fmt(r.ceiling_height)}"
-        rooms.append(f'<polygon points="{pts}" fill="{ROOM_FILLS[k % len(ROOM_FILLS)]}" '
-                     f'data-room="{r.id}" data-label="{r.label}"><title>{escape(tip)}</title></polygon>')
+    def point_behind_wall(self, room: Room, wall: Wall) -> tuple:
+        out_x, out_y = self.outward_normal(room, wall)
+        mid_x = (wall.start[0] + wall.end[0]) / 2
+        mid_y = (wall.start[1] + wall.end[1]) / 2
+        distance = wall.thickness_m + 0.05
+        return mid_x + out_x * distance, mid_y + out_y * distance
 
-        for w in r.walls:
-            (sx, sy), (ex, ey) = c.pt(*w.start), c.pt(*w.end)
-            # shift the stroke outward by half the thickness so the inner face sits on the coordinates
-            ox, oy = _outward(r, w)
-            half = w.thickness_m / 2 * PX_PER_M
-            dx, dy = ox * half, -oy * half
-            L = w.length.value if w.length else w.geometric_length
-            walls.append(f'<line x1="{sx+dx}" y1="{sy+dy}" x2="{ex+dx}" y2="{ey+dy}" stroke="#2B2B2B" '
-                         f'stroke-width="{w.thickness_m*PX_PER_M}" stroke-linecap="square" '
-                         f'data-wall="{w.id}" data-room="{r.id}" data-length="{L:.3f}">'
-                         f'<title>{w.id}: {escape(_fmt(w.length, w.geometric_length))}</title></line>')
+    def neighbour_rooms(self, plan: FloorPlan, room: Room, wall: Wall) -> list:
+        probe = self.point_behind_wall(room, wall)
+        neighbours = []
 
-            # dimension line: outside for exterior walls, inside the room for shared partitions
-            shared = _is_shared(plan, r, w)
-            if shared and r.id != min(o_.id for o_ in plan.rooms if _shares(o_, w, r)):
-                continue  # partition already dimensioned from the neighbouring room
-            off = -0.3 if shared else (DIM_OFFSET_M + w.thickness_m)
-            a = c.pt(w.start[0] + ox * off, w.start[1] + oy * off)
-            b = c.pt(w.end[0] + ox * off, w.end[1] + oy * off)
-            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-            ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
-            if ang > 90 or ang < -90:
-                ang += 180
-            tick = 6
-            nx, ny = ox * tick, -oy * tick
-            dims.append(
-                f'<g data-dim="{w.id}"><line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="#C0392B" stroke-width="1"/>'
-                f'<line x1="{a[0]-nx}" y1="{a[1]-ny}" x2="{a[0]+nx}" y2="{a[1]+ny}" stroke="#C0392B" stroke-width="1"/>'
-                f'<line x1="{b[0]-nx}" y1="{b[1]-ny}" x2="{b[0]+nx}" y2="{b[1]+ny}" stroke="#C0392B" stroke-width="1"/>'
-                f'<text x="{mx}" y="{my}" transform="rotate({ang:.1f} {mx} {my}) translate(0 -4)" '
-                f'text-anchor="middle" font-size="12" fill="#C0392B">{escape(_fmt(w.length, w.geometric_length))}</text></g>')
+        for other in plan.rooms:
+            if other.id != room.id and self.is_point_inside(probe, self.geometry.room_polygon(other)):
+                neighbours.append(other)
 
-        wall_by_id = {w.id: w for w in r.walls}
-        for o in r.openings:
-            w = wall_by_id[o.wall_id]
-            ux, uy = _unit(w)
-            ox, oy = _outward(r, w)
-            p0 = (w.start[0] + ux * o.offset_m, w.start[1] + uy * o.offset_m)
-            p1 = (p0[0] + ux * o.width.value, p0[1] + uy * o.width.value)
-            mid = (-ox * w.thickness_m / 2, -oy * w.thickness_m / 2)  # centre of wall thickness
-            q0 = c.pt(p0[0] - mid[0], p0[1] - mid[1])
-            q1 = c.pt(p1[0] - mid[0], p1[1] - mid[1])
-            tip = f"{o.type} {o.id}: width {_fmt(o.width)}" + (f" → {o.leads_to}" if o.leads_to else "")
-            parts = [f'<line x1="{q0[0]}" y1="{q0[1]}" x2="{q1[0]}" y2="{q1[1]}" stroke="white" '
-                     f'stroke-width="{w.thickness_m*PX_PER_M+2}"/>']  # cut the gap
-            pair = frozenset((r.id, o.leads_to)) if o.leads_to else None
-            already = pair in drawn_doors if pair else False
-            if pair and o.type == "door":
-                drawn_doors.add(pair)
-            if o.type == "door" and not already:
-                hinge, free = (p0, p1) if o.swing == "left" else (p1, p0)
-                rad = o.width.value
-                leaf_end = (hinge[0] - ox * rad, hinge[1] - oy * rad)  # leaf opens into the room
-                h, f_, le = c.pt(*hinge), c.pt(*free), c.pt(*leaf_end)
-                sweep = 1 if (o.swing == "left") == r.is_ccw else 0
-                parts.append(f'<line x1="{h[0]}" y1="{h[1]}" x2="{le[0]}" y2="{le[1]}" stroke="#2B2B2B" stroke-width="2"/>')
-                parts.append(f'<path d="M {le[0]} {le[1]} A {rad*PX_PER_M} {rad*PX_PER_M} 0 0 {sweep} {f_[0]} {f_[1]}" '
-                             f'fill="none" stroke="#2B2B2B" stroke-width="1" stroke-dasharray="4 3"/>')
-            elif o.type == "window":
-                for s in (-1, 0, 1):
-                    sh = s * w.thickness_m / 3
-                    a = c.pt(p0[0] - mid[0] + ox * sh, p0[1] - mid[1] + oy * sh)
-                    b = c.pt(p1[0] - mid[0] + ox * sh, p1[1] - mid[1] + oy * sh)
-                    parts.append(f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="#3A7BD5" stroke-width="1.5"/>')
-            openings.append(f'<g data-opening="{o.id}" data-type="{o.type}" data-wall="{w.id}" '
-                            f'data-width="{o.width.value:.3f}"><title>{escape(tip)}</title>{"".join(parts)}</g>')
+        return neighbours
 
-        for d in r.damage:
-            tip = f"{d.damage_class} on {d.surface_type} {d.wall_id or ''}: {d.extent_m2.value:.2f} m² (conf {d.confidence:.0%})"
-            if d.surface_type == "wall" and d.wall_id:
-                w = wall_by_id[d.wall_id]
-                mx, my = (w.start[0] + w.end[0]) / 2, (w.start[1] + w.end[1]) / 2
-                ox, oy = _outward(r, w)
-                x, y = c.pt(mx - ox * 0.15, my - oy * 0.15)
-            else:
-                cx = sum(p[0] for p in r.polygon) / len(r.polygon)
-                cy = sum(p[1] for p in r.polygon) / len(r.polygon)
-                x, y = c.pt(cx, cy - 0.5)
-            damage.append(f'<g data-damage="{d.id}" data-class="{d.damage_class}"><title>{escape(tip)}</title>'
-                          f'<circle cx="{x}" cy="{y}" r="9" fill="{DAMAGE_COLOR}" fill-opacity="0.85"/>'
-                          f'<text x="{x}" y="{y+4}" text-anchor="middle" font-size="11" fill="white" font-weight="bold">!</text></g>')
+    def polygon_centre(self, room: Room) -> tuple:
+        polygon = self.geometry.room_polygon(room)
+        centre_x = sum(point[0] for point in polygon) / len(polygon)
+        centre_y = sum(point[1] for point in polygon) / len(polygon)
+        return centre_x, centre_y
 
-        cx = sum(p[0] for p in r.polygon) / len(r.polygon)
-        cy = sum(p[1] for p in r.polygon) / len(r.polygon)
-        x, y = c.pt(cx, cy)
-        title = escape(r.name or r.label.replace("_", " ").title())
-        ai = r.area_interval()
-        sub = f"{ai.value:.1f} m²" + (f" ±{ai.half_width:.1f}" if ai.half_width >= 0.05 else "") + (f" · h {r.ceiling_height.value:.2f} m" if r.ceiling_height else "")
-        labels.append(f'<g data-label-for="{r.id}"><text x="{x}" y="{y}" text-anchor="middle" font-size="15" '
-                      f'font-weight="600" fill="#1F2D3D">{title}</text>'
-                      f'<text x="{x}" y="{y+18}" text-anchor="middle" font-size="12" fill="#4A5868">{escape(sub)}</text></g>')
+    def draw_room(self, canvas: Canvas, room: Room, index: int) -> str:
+        points = []
 
-    # scale bar + header
-    sb0, sb1 = c.pt(c.minx + 0.3, c.maxy - (c.h - 40) / PX_PER_M + 0.3), None
-    sb1 = (sb0[0] + PX_PER_M, sb0[1])
-    header = (f'<text x="12" y="24" font-size="14" font-weight="600" fill="#1F2D3D">'
-              f'{escape(plan.capture.id)} · tier: {plan.capture.tier} · total {plan.total_area():.1f} m²</text>')
-    scalebar = (f'<g id="scale"><line x1="{sb0[0]}" y1="{sb0[1]}" x2="{sb1[0]}" y2="{sb1[1]}" stroke="#2B2B2B" stroke-width="3"/>'
-                f'<text x="{sb0[0]}" y="{sb0[1]-6}" font-size="11" fill="#2B2B2B">1 m</text></g>')
+        for x, y in self.geometry.room_polygon(room):
+            screen_x, screen_y = canvas.to_screen(x, y)
+            points.append(f"{screen_x},{screen_y}")
 
-    body = "\n".join([
-        f'<g id="rooms">{"".join(rooms)}</g>',
-        f'<g id="walls">{"".join(walls)}</g>',
-        f'<g id="openings">{"".join(openings)}</g>',
-        f'<g id="damage">{"".join(damage)}</g>',
-        f'<g id="dimensions">{"".join(dims)}</g>',
-        f'<g id="labels">{"".join(labels)}</g>',
-        scalebar, header,
-    ])
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{c.w:.0f}" height="{c.h:.0f}" '
-            f'viewBox="0 0 {c.w:.0f} {c.h:.0f}" font-family="Helvetica, Arial, sans-serif" '
-            f'data-schema-version="{plan.schema_version}" data-units="m" data-px-per-m="{PX_PER_M}">\n'
-            f'<rect width="100%" height="100%" fill="white"/>\n{body}\n</svg>\n')
+        area = self.geometry.room_area(room)
+        tip = f"{room.name or room.label} ({room.id}) | area {area:.2f} m² | ceiling {self.format_length(room.ceiling_height)}"
+        fill = ROOM_FILLS[index % len(ROOM_FILLS)]
+
+        return (f'<polygon points="{" ".join(points)}" fill="{fill}" '
+                f'data-room="{room.id}" data-label="{room.label}"><title>{escape(tip)}</title></polygon>')
+
+    def draw_wall(self, canvas: Canvas, room: Room, wall: Wall) -> str:
+        start_x, start_y = canvas.to_screen(*wall.start)
+        end_x, end_y = canvas.to_screen(*wall.end)
+
+        out_x, out_y = self.outward_normal(room, wall)
+        half = wall.thickness_m / 2 * PX_PER_M
+        shift_x = out_x * half
+        shift_y = -out_y * half
+
+        length = self.geometry.wall_length(wall)
+        label = self.format_length(wall.length, self.geometry.geometric_length(wall))
+
+        return (f'<line x1="{start_x + shift_x}" y1="{start_y + shift_y}" x2="{end_x + shift_x}" y2="{end_y + shift_y}" '
+                f'stroke="{WALL_COLOR}" stroke-width="{wall.thickness_m * PX_PER_M}" stroke-linecap="square" '
+                f'data-wall="{wall.id}" data-room="{room.id}" data-length="{length:.3f}">'
+                f'<title>{wall.id}: {escape(label)}</title></line>')
+
+    def draw_dimension(self, canvas: Canvas, plan: FloorPlan, room: Room, wall: Wall) -> str:
+        neighbours = self.neighbour_rooms(plan, room, wall)
+        is_shared = len(neighbours) > 0
+
+        if is_shared:
+            smallest_id = min([room.id] + [other.id for other in neighbours])
+            if room.id != smallest_id:
+                return ""
+
+        out_x, out_y = self.outward_normal(room, wall)
+
+        if is_shared:
+            offset = -0.3
+        else:
+            offset = DIM_OFFSET_M + wall.thickness_m
+
+        a = canvas.to_screen(wall.start[0] + out_x * offset, wall.start[1] + out_y * offset)
+        b = canvas.to_screen(wall.end[0] + out_x * offset, wall.end[1] + out_y * offset)
+        mid_x = (a[0] + b[0]) / 2
+        mid_y = (a[1] + b[1]) / 2
+
+        angle = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        if angle > 90 or angle < -90:
+            angle += 180
+
+        tick = 6
+        tick_x = out_x * tick
+        tick_y = -out_y * tick
+        label = self.format_length(wall.length, self.geometry.geometric_length(wall))
+
+        return (f'<g data-dim="{wall.id}">'
+                f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="{DIM_COLOR}" stroke-width="1"/>'
+                f'<line x1="{a[0] - tick_x}" y1="{a[1] - tick_y}" x2="{a[0] + tick_x}" y2="{a[1] + tick_y}" stroke="{DIM_COLOR}" stroke-width="1"/>'
+                f'<line x1="{b[0] - tick_x}" y1="{b[1] - tick_y}" x2="{b[0] + tick_x}" y2="{b[1] + tick_y}" stroke="{DIM_COLOR}" stroke-width="1"/>'
+                f'<text x="{mid_x}" y="{mid_y}" transform="rotate({angle:.1f} {mid_x} {mid_y}) translate(0 -4)" '
+                f'text-anchor="middle" font-size="12" fill="{DIM_COLOR}">{escape(label)}</text></g>')
+
+    def draw_opening(self, canvas: Canvas, room: Room, opening, drawn_doors: set) -> str:
+        wall = None
+        for candidate in room.walls:
+            if candidate.id == opening.wall_id:
+                wall = candidate
+
+        if wall is None:
+            return ""
+
+        dir_x, dir_y = self.wall_direction(wall)
+        out_x, out_y = self.outward_normal(room, wall)
+
+        near = (wall.start[0] + dir_x * opening.offset_m, wall.start[1] + dir_y * opening.offset_m)
+        far = (near[0] + dir_x * opening.width.value, near[1] + dir_y * opening.width.value)
+        to_centre_x = out_x * wall.thickness_m / 2
+        to_centre_y = out_y * wall.thickness_m / 2
+
+        gap_start = canvas.to_screen(near[0] + to_centre_x, near[1] + to_centre_y)
+        gap_end = canvas.to_screen(far[0] + to_centre_x, far[1] + to_centre_y)
+
+        tip = f"{opening.type} {opening.id}: width {self.format_length(opening.width)}"
+        if opening.leads_to:
+            tip += f" → {opening.leads_to}"
+
+        parts = [f'<line x1="{gap_start[0]}" y1="{gap_start[1]}" x2="{gap_end[0]}" y2="{gap_end[1]}" '
+                 f'stroke="white" stroke-width="{wall.thickness_m * PX_PER_M + 2}"/>']
+
+        door_pair = None
+        already_drawn = False
+        if opening.leads_to:
+            door_pair = frozenset((room.id, opening.leads_to))
+            already_drawn = door_pair in drawn_doors
+
+        if opening.type == "door" and door_pair is not None:
+            drawn_doors.add(door_pair)
+
+        if opening.type == "door" and not already_drawn:
+            parts.extend(self.draw_door_leaf(canvas, room, opening, near, far, out_x, out_y))
+
+        if opening.type == "window":
+            for step in (-1, 0, 1):
+                shift = step * wall.thickness_m / 3
+                a = canvas.to_screen(near[0] + to_centre_x + out_x * shift, near[1] + to_centre_y + out_y * shift)
+                b = canvas.to_screen(far[0] + to_centre_x + out_x * shift, far[1] + to_centre_y + out_y * shift)
+                parts.append(f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="{WINDOW_COLOR}" stroke-width="1.5"/>')
+
+        return (f'<g data-opening="{opening.id}" data-type="{opening.type}" data-wall="{wall.id}" '
+                f'data-width="{opening.width.value:.3f}"><title>{escape(tip)}</title>{"".join(parts)}</g>')
+
+    def draw_door_leaf(self, canvas: Canvas, room: Room, opening, near: tuple, far: tuple, out_x: float, out_y: float) -> list:
+        if opening.swing == "left":
+            hinge, free = near, far
+        else:
+            hinge, free = far, near
+
+        radius = opening.width.value
+        leaf_end = (hinge[0] - out_x * radius, hinge[1] - out_y * radius)
+
+        hinge_px = canvas.to_screen(*hinge)
+        free_px = canvas.to_screen(*free)
+        leaf_px = canvas.to_screen(*leaf_end)
+
+        sweep = 1 if (opening.swing == "left") == self.geometry.is_counter_clockwise(room) else 0
+        radius_px = radius * PX_PER_M
+
+        return [
+            f'<line x1="{hinge_px[0]}" y1="{hinge_px[1]}" x2="{leaf_px[0]}" y2="{leaf_px[1]}" stroke="{WALL_COLOR}" stroke-width="2"/>',
+            f'<path d="M {leaf_px[0]} {leaf_px[1]} A {radius_px} {radius_px} 0 0 {sweep} {free_px[0]} {free_px[1]}" '
+            f'fill="none" stroke="{WALL_COLOR}" stroke-width="1" stroke-dasharray="4 3"/>',
+        ]
+
+    def draw_damage(self, canvas: Canvas, room: Room, damage) -> str:
+        tip = (f"{damage.damage_class} on {damage.surface_type} {damage.wall_id or ''}: "
+               f"{damage.extent_m2.value:.2f} m² (conf {damage.confidence:.0%})")
+
+        wall = None
+        for candidate in room.walls:
+            if candidate.id == damage.wall_id:
+                wall = candidate
+
+        if damage.surface_type == "wall" and wall is not None:
+            out_x, out_y = self.outward_normal(room, wall)
+            mid_x = (wall.start[0] + wall.end[0]) / 2
+            mid_y = (wall.start[1] + wall.end[1]) / 2
+            x, y = canvas.to_screen(mid_x - out_x * 0.15, mid_y - out_y * 0.15)
+        else:
+            centre_x, centre_y = self.polygon_centre(room)
+            x, y = canvas.to_screen(centre_x, centre_y - 0.5)
+
+        return (f'<g data-damage="{damage.id}" data-class="{damage.damage_class}"><title>{escape(tip)}</title>'
+                f'<circle cx="{x}" cy="{y}" r="9" fill="{DAMAGE_COLOR}" fill-opacity="0.85"/>'
+                f'<text x="{x}" y="{y + 4}" text-anchor="middle" font-size="11" fill="white" font-weight="bold">!</text></g>')
+
+    def draw_label(self, canvas: Canvas, room: Room) -> str:
+        centre_x, centre_y = self.polygon_centre(room)
+        x, y = canvas.to_screen(centre_x, centre_y)
+
+        title = escape(room.name or room.label.replace("_", " ").title())
+        area = self.geometry.area_interval(room)
+        area_half_width = self.geometry.half_width(area)
+
+        subtitle = f"{area.value:.1f} m²"
+        if area_half_width >= 0.05:
+            subtitle += f" ±{area_half_width:.1f}"
+        if room.ceiling_height is not None:
+            subtitle += f" · h {room.ceiling_height.value:.2f} m"
+
+        return (f'<g data-label-for="{room.id}"><text x="{x}" y="{y}" text-anchor="middle" font-size="15" '
+                f'font-weight="600" fill="#1F2D3D">{title}</text>'
+                f'<text x="{x}" y="{y + 18}" text-anchor="middle" font-size="12" fill="#4A5868">{escape(subtitle)}</text></g>')
+
+    def draw_scale_bar(self, canvas: Canvas) -> str:
+        start = (20, canvas.height - 20)
+        end = (start[0] + PX_PER_M, start[1])
+
+        return (f'<g id="scale"><line x1="{start[0]}" y1="{start[1]}" x2="{end[0]}" y2="{end[1]}" stroke="{WALL_COLOR}" stroke-width="3"/>'
+                f'<text x="{start[0]}" y="{start[1] - 6}" font-size="11" fill="{WALL_COLOR}">1 m</text></g>')
+
+    def draw_header(self, plan: FloorPlan) -> str:
+        total = self.geometry.total_area(plan)
+        return (f'<text x="12" y="24" font-size="14" font-weight="600" fill="#1F2D3D">'
+                f'{escape(plan.capture.id)} · tier: {plan.capture.tier} · total {total:.1f} m²</text>')
+
+    def create_svg(self, plan: FloorPlan) -> str:
+        canvas = Canvas(plan, self.geometry)
+        drawn_doors = set()
+
+        rooms = []
+        walls = []
+        openings = []
+        damages = []
+        dimensions = []
+        labels = []
+
+        for index, room in enumerate(plan.rooms):
+            rooms.append(self.draw_room(canvas, room, index))
+
+            for wall in room.walls:
+                walls.append(self.draw_wall(canvas, room, wall))
+                dimensions.append(self.draw_dimension(canvas, plan, room, wall))
+
+            for opening in room.openings:
+                openings.append(self.draw_opening(canvas, room, opening, drawn_doors))
+
+            for damage in room.damage:
+                damages.append(self.draw_damage(canvas, room, damage))
+
+            labels.append(self.draw_label(canvas, room))
+
+        body = "\n".join([
+            f'<g id="rooms">{"".join(rooms)}</g>',
+            f'<g id="walls">{"".join(walls)}</g>',
+            f'<g id="openings">{"".join(openings)}</g>',
+            f'<g id="damage">{"".join(damages)}</g>',
+            f'<g id="dimensions">{"".join(dimensions)}</g>',
+            f'<g id="labels">{"".join(labels)}</g>',
+            self.draw_scale_bar(canvas),
+            self.draw_header(plan),
+        ])
+
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas.width:.0f}" height="{canvas.height:.0f}" '
+                f'viewBox="0 0 {canvas.width:.0f} {canvas.height:.0f}" font-family="Helvetica, Arial, sans-serif" '
+                f'data-units="m" data-px-per-m="{PX_PER_M}">\n'
+                f'<rect width="100%" height="100%" fill="white"/>\n{body}\n</svg>\n')

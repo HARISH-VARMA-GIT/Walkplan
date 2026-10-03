@@ -5,7 +5,7 @@ from measure_distance import DepthEstimator, DistanceMeasurer
 from object_segmenter import ObjectFinder
 
 
-IMAGE_PATH = "../inputs/images/room1/WhatsApp Image 2026-10-02 at 9.35.06 PM.jpeg"
+IMAGE_PATH = "../inputs/images/room1/WhatsApp Image 2026-10-02 at 9.35.06 PM (1).jpeg"
 OUTPUT_PATH = "../../output/room1/door_sam_measurement.png"
 MODEL_NAME = "Ruicheng/moge-2-vitl-normal"
 OBJECT_NAME = "door"

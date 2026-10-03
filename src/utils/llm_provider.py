@@ -19,7 +19,13 @@ class LlmProvider:
 
 class OpenAiProvider(LlmProvider):
 
+    def is_reasoning_model(self, model_name: str) -> bool:
+        return model_name.startswith(("gpt-5", "o1", "o3", "o4"))
+
     def create_chat_model(self, model_name, temperature=0, timeout=None, max_tokens=None) -> ChatOpenAI:
+        if self.is_reasoning_model(model_name):
+            temperature = None
+
         return ChatOpenAI(
             model=model_name,
             api_key=os.getenv("OPENAI_API_KEY"),

@@ -44,6 +44,15 @@ class ImageConverter:
             image.save(buffer, format="JPEG", quality=self.jpeg_quality)
             return buffer.getvalue()
 
+    def load_rgb_array(self, image_path: str, max_side_pixels: int = 1600):
+        import numpy as np
+
+        with Image.open(image_path) as image:
+            image = ImageOps.exif_transpose(image)
+            image = image.convert("RGB")
+            image.thumbnail((max_side_pixels, max_side_pixels))
+            return np.array(image)
+
     def save_as_jpeg(self, image_path: str, output_path: str) -> str:
         jpeg_bytes = self.convert_to_jpeg_bytes(image_path)
 
