@@ -3,6 +3,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
+from modules.image_processing.main import ImageProcessingService
 
 
 load_dotenv()
@@ -25,7 +26,6 @@ class App:
         return parser.parse_args()
 
     def run(self):
-        from modules.image_processing.main import ImageProcessingService
 
         arguments = self.read_arguments()
         room_name = os.path.basename(os.path.normpath(arguments.images))

@@ -9,6 +9,7 @@ PX_PER_M = 100
 MARGIN_M = 1.0
 TITLE_HEIGHT_PX = 40
 DIM_OFFSET_M = 0.35
+OPENING_LABEL_OFFSET_M = 0.2
 ROOM_FILLS = ["#EAF2FB", "#EEF7EC", "#FBF1E6", "#F3ECF8", "#E9F6F6", "#FBEFF1"]
 DAMAGE_COLOR = "#D9480F"
 DIM_COLOR = "#C0392B"
@@ -219,8 +220,41 @@ class SvgCreator:
                 b = canvas.to_screen(far[0] + to_centre_x + out_x * shift, far[1] + to_centre_y + out_y * shift)
                 parts.append(f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="{WINDOW_COLOR}" stroke-width="1.5"/>')
 
+        parts.append(self.draw_opening_label(canvas, opening, near, far, out_x, out_y, wall.thickness_m))
+
         return (f'<g data-opening="{opening.id}" data-type="{opening.type}" data-wall="{wall.id}" '
                 f'data-width="{opening.width.value:.3f}"><title>{escape(tip)}</title>{"".join(parts)}</g>')
+
+    def opening_label_text(self, opening) -> str:
+        text = f"{opening.id} {opening.width.value:.2f}"
+
+        if opening.height is not None:
+            text += f" × {opening.height.value:.2f}"
+
+        text += " m"
+
+        if opening.type == "window" and opening.sill_height is not None:
+            text += f" (sill {opening.sill_height.value:.2f})"
+
+        return text
+
+    def draw_opening_label(self, canvas: Canvas, opening, near: tuple, far: tuple, out_x: float, out_y: float, thickness: float) -> str:
+        inward = thickness / 2 + OPENING_LABEL_OFFSET_M
+        mid_x = (near[0] + far[0]) / 2 - out_x * inward
+        mid_y = (near[1] + far[1]) / 2 - out_y * inward
+        x, y = canvas.to_screen(mid_x, mid_y)
+
+        start = canvas.to_screen(*near)
+        end = canvas.to_screen(*far)
+        angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
+        if angle > 90 or angle < -90:
+            angle += 180
+
+        color = WINDOW_COLOR if opening.type == "window" else WALL_COLOR
+        text = escape(self.opening_label_text(opening))
+
+        return (f'<text x="{x}" y="{y}" transform="rotate({angle:.1f} {x} {y})" text-anchor="middle" '
+                f'dominant-baseline="middle" font-size="11" fill="{color}">{text}</text>')
 
     def draw_door_leaf(self, canvas: Canvas, room: Room, opening, near: tuple, far: tuple, out_x: float, out_y: float) -> list:
         if opening.swing == "left":
