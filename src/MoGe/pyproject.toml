@@ -28,6 +28,7 @@ dependencies = [
   "flex-gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf",
   "gradio>=6.0",
   "starlette",
+  "transformers>=5.17.0",
 ]
 
 [project.urls]
