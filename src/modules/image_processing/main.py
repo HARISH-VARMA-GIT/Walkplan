@@ -6,13 +6,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from models.floor_plan import CaptureInfo, FloorPlan
 from models.image_models import RoomImageAnalysis, RoomLayout
-from models.photo_geometry import RoomPhotoGeometry
+from models.photo_geometry import RoomPhotoGeometry, RoomPlacements
 from modules.floor_plan_generator.main import FloorPlanRenderer
 from modules.image_processing.depth_estimator import DepthEstimator
+from modules.image_processing.geometry_layout import GeometryLayoutBuilder
 from modules.image_processing.layout_reasoner import LayoutReasoner
 from modules.image_processing.opening_finder import OpeningFinder, OpeningMeasurer
 from modules.image_processing.overlay_drawer import OverlayDrawer
 from modules.image_processing.photo_measurer import PhotoMeasurer
+from modules.image_processing.photo_placer import PhotoPlacer
+from modules.image_processing.pose_estimator import PoseEstimator
 from modules.image_processing.room_assembler import RoomAssembler
 from utils.image_utils import ImageConverter
 from utils.llm_provider import LlmClient, VisionLimiter
@@ -27,8 +30,10 @@ class OutputFolder:
     def __init__(self, folder_path: str):
         self.folder_path = folder_path
         self.depth_folder = os.path.join(folder_path, "depth")
+        self.pose_folder = os.path.join(folder_path, "poses")
         self.overlay_folder = os.path.join(folder_path, "overlays")
         self.photo_geometry_path = os.path.join(folder_path, "photo_geometry.json")
+        self.placements_path = os.path.join(folder_path, "placements.json")
         self.layout_path = os.path.join(folder_path, "layout.json")
         self.matches_path = os.path.join(folder_path, "wall_matches_used.json")
         self.floor_plan_path = os.path.join(folder_path, "floor_plan.json")
@@ -39,6 +44,9 @@ class OutputFolder:
 
     def depth_path(self, photo_id: str) -> str:
         return os.path.join(self.depth_folder, f"{photo_id}.npz")
+
+    def pose_path(self, photo_id: str) -> str:
+        return os.path.join(self.pose_folder, f"{photo_id}.npz")
 
     def overlay_path(self, photo_id: str) -> str:
         return os.path.join(self.overlay_folder, f"{photo_id}.jpg")
@@ -73,6 +81,9 @@ class ImageProcessingService:
         self.room_assembler = RoomAssembler()
         self.renderer = FloorPlanRenderer()
         self.layout_reasoner = None
+        self.pose_estimator = PoseEstimator()
+        self.photo_placer = PhotoPlacer()
+        self.geometry_layout_builder = GeometryLayoutBuilder()
 
     def process_image(self, folder_path: str) -> dict:
         image_paths = self.image_converter.list_image_paths(folder_path)
@@ -118,12 +129,45 @@ class ImageProcessingService:
             logger.info("Depth for %s (%s)", photo_id, os.path.basename(image_path))
 
             image_rgb = self.image_converter.load_rgb_array(image_path)
-            self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(photo_id))
+            self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(photo_id), os.path.basename(image_path))
 
         self.depth_estimator.unload_model()
 
-    def measure_photos(self, room_name: str, image_paths: list, output: OutputFolder) -> RoomPhotoGeometry:
+    def load_depth(self, index: int, image_path: str, output: OutputFolder) -> tuple:
+        image_rgb = self.image_converter.load_rgb_array(image_path)
+        depth = self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(self.photo_id(index)), os.path.basename(image_path))
+        return image_rgb, depth
+
+    def height_hints(self, image_paths: list, poses: list, output: OutputFolder) -> tuple:
+        if poses is None:
+            return [None] * len(image_paths), [None] * len(image_paths)
+
+        depths = []
+        first_floor_normals = []
+        for index, image_path in enumerate(image_paths):
+            image_rgb, depth = self.load_depth(index, image_path, output)
+            depths.append(depth)
+
+            planes = self.photo_measurer.plane_finder.find_planes(depth["points"], depth["mask"])
+            surfaces = self.photo_measurer.classifier.classify(planes)
+            first_floor_normals.append(None if surfaces.floor is None else surfaces.floor.normal)
+
+        up = self.photo_placer.up_from_cameras(poses, first_floor_normals)
+        up_hints = self.photo_placer.up_hints(poses, up)
+
+        floor_offsets = []
+        for depth, up_hint in zip(depths, up_hints):
+            floor_offsets.append(self.photo_measurer.find_floor_offset(depth, up_hint))
+
+        scale = self.photo_placer.shared_scale(depths, poses)
+        floor_hints = self.photo_placer.floor_hints(poses, up, scale, floor_offsets)
+        logger.info("Camera heights from shared floor: %s", [None if hint is None else round(hint, 2) for hint in floor_hints])
+
+        return up_hints, floor_hints
+
+    def measure_photos(self, room_name: str, image_paths: list, output: OutputFolder, poses: list = None) -> RoomPhotoGeometry:
         self.estimate_all_depths(image_paths, output)
+        up_hints, floor_hints = self.height_hints(image_paths, poses, output)
         photos = []
 
         for index, image_path in enumerate(image_paths):
@@ -131,12 +175,12 @@ class ImageProcessingService:
             logger.info("Measuring %s (%s)", photo_id, os.path.basename(image_path))
 
             image_rgb = self.image_converter.load_rgb_array(image_path)
-            depth = self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(photo_id))
+            depth = self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(photo_id), os.path.basename(image_path))
 
             detections = self.opening_finder.find_openings(image_rgb)
             opening_pixels = self.opening_finder.combined_mask(detections, depth["mask"].shape)
 
-            analysis = self.photo_measurer.measure(photo_id, image_path, depth, opening_pixels)
+            analysis = self.photo_measurer.measure(photo_id, image_path, depth, opening_pixels, up_hints[index], floor_hints[index])
             analysis.geometry.openings = self.opening_measurer.measure(analysis, detections, depth)
 
             self.overlay_drawer.save(image_rgb, analysis, output.overlay_path(photo_id))
@@ -157,7 +201,36 @@ class ImageProcessingService:
 
         return layout
 
-    def build_floor_plan(self, folder_path: str, output_folder: str, redo_photos: bool = False, redo_layout: bool = False) -> dict:
+    def estimate_all_poses(self, image_paths: list, output: OutputFolder) -> list:
+        logger.info("Camera poses for %d photos (MapAnything)", len(image_paths))
+        cache_paths = [output.pose_path(self.photo_id(index)) for index in range(len(image_paths))]
+
+        poses = self.pose_estimator.estimate_with_cache(image_paths, cache_paths)
+        self.pose_estimator.unload_model()
+
+        return poses
+
+    def place_photos(self, photo_set: RoomPhotoGeometry, poses: list, image_paths: list, output: OutputFolder) -> RoomPlacements:
+        moge_depths = []
+        for index, image_path in enumerate(image_paths):
+            image_rgb = self.image_converter.load_rgb_array(image_path)
+            moge_depths.append(self.depth_estimator.estimate_with_cache(image_rgb, output.depth_path(self.photo_id(index)), os.path.basename(image_path)))
+
+        placements = self.photo_placer.place(photo_set, poses, moge_depths)
+        output.save_json(output.placements_path, placements.model_dump())
+        logger.info("MapAnything to MoGe scale %.3f", placements.scale)
+
+        return placements
+
+    def geometry_layout(self, photo_set: RoomPhotoGeometry, placements: RoomPlacements, room_type: str, output: OutputFolder) -> RoomLayout:
+        layout = self.geometry_layout_builder.build_layout(photo_set, placements, room_type)
+        output.save_json(output.layout_path, layout.model_dump())
+        logger.info(layout.notes)
+
+        return layout
+
+    def build_floor_plan(self, folder_path: str, output_folder: str, redo_photos: bool = False, redo_layout: bool = False,
+                         layout_mode: str = "geometry", room_type: str = "other") -> dict:
         image_paths = self.image_converter.list_image_paths(folder_path)
         if not image_paths:
             raise ValueError(f"No images found in {folder_path}")
@@ -165,21 +238,32 @@ class ImageProcessingService:
         room_name = os.path.basename(os.path.normpath(folder_path))
         output = OutputFolder(output_folder)
 
+        poses = None
+        if layout_mode == "geometry":
+            poses = self.estimate_all_poses(image_paths, output)
+
         if redo_photos or not os.path.exists(output.photo_geometry_path):
-            photo_set = self.measure_photos(room_name, image_paths, output)
+            photo_set = self.measure_photos(room_name, image_paths, output, poses)
             redo_layout = True
         else:
             logger.info("Using saved %s", output.photo_geometry_path)
             photo_set = RoomPhotoGeometry.model_validate(output.load_json(output.photo_geometry_path))
 
-        if redo_layout or not os.path.exists(output.layout_path):
-            logger.info("Asking the vision model for the room layout")
-            layout = self.find_layout(photo_set, output)
-        else:
+        placements = None
+        if layout_mode == "geometry":
+            placements = self.place_photos(photo_set, poses, image_paths, output)
+
+        if not redo_layout and os.path.exists(output.layout_path):
             logger.info("Using saved %s", output.layout_path)
             layout = RoomLayout.model_validate(output.load_json(output.layout_path))
+        elif layout_mode == "geometry":
+            logger.info("Building the room layout from camera poses")
+            layout = self.geometry_layout(photo_set, placements, room_type, output)
+        else:
+            logger.info("Asking the vision model for the room layout")
+            layout = self.find_layout(photo_set, output)
 
-        assembled = self.room_assembler.assemble(photo_set, layout)
+        assembled = self.room_assembler.assemble(photo_set, layout, placements)
         for note in assembled["notes"]:
             logger.warning(note)
 

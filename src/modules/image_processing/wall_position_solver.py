@@ -9,6 +9,8 @@ OUTLIER_LIMIT = 3.0
 MIN_OUTLIER_M = 0.4
 HEADING_LIMIT_DEG = 30
 INSIDE_ROUNDS = 5
+PRIOR_SIGMA_M = 0.3
+WALL_PRIOR_SIGMA_M = 0.5
 
 
 class PhotoPose:
@@ -17,6 +19,7 @@ class PhotoPose:
         self.photo_id = photo_id
         self.heading = heading
         self.position = None
+        self.prior = None
 
     def rotate(self, point) -> np.ndarray:
         cos_value = math.cos(self.heading)
@@ -54,6 +57,10 @@ class WallPositionSolver:
         self.notes = []
         self.wall_positions = None
         self.wall_sigmas = None
+        self.wall_priors = {}
+
+    def set_wall_prior(self, wall_index: int, position: float):
+        self.wall_priors[wall_index] = position
 
     def angle_of(self, vector) -> float:
         return math.atan2(vector[1], vector[0])
@@ -91,15 +98,34 @@ class WallPositionSolver:
                 observed.add(observation.wall_index)
         return observed
 
-    def add_photo(self, photo_id: str, seen_walls: list):
+    def keep_walls_near_heading(self, photo_id: str, seen_walls: list, heading: float) -> list:
+        kept = []
+
+        for seen in seen_walls:
+            angle = self.angle_of(self.normals[seen["wall_index"]]) - self.angle_of(seen["normal"])
+            if self.heading_difference_deg(angle, heading) < HEADING_LIMIT_DEG:
+                kept.append(seen)
+            else:
+                self.notes.append(f"{photo_id}: wall match to W{seen['wall_index'] + 1} disagrees with the camera pose, ignored")
+
+        return kept
+
+    def add_photo(self, photo_id: str, seen_walls: list, heading: float = None, prior_position=None):
         if not seen_walls:
             return
 
-        heading, kept = self.estimate_heading(photo_id, seen_walls)
-        if not self.has_two_directions(kept):
+        if heading is None:
+            heading, kept = self.estimate_heading(photo_id, seen_walls)
+        else:
+            kept = self.keep_walls_near_heading(photo_id, seen_walls, heading)
+
+        if prior_position is None and not self.has_two_directions(kept):
+            return
+        if not kept:
             return
 
         self.poses[photo_id] = PhotoPose(photo_id, heading)
+        self.poses[photo_id].prior = None if prior_position is None else np.array(prior_position, dtype=float)
 
         for seen in kept:
             self.observations.append(Observation(photo_id, seen["wall_index"], seen["distance"]))
@@ -120,6 +146,14 @@ class WallPositionSolver:
         before = (wall_index - 1) % self.wall_count
         after = (wall_index + 1) % self.wall_count
         return [before, after]
+
+    def is_normal_corner(self, wall_index: int, neighbour_index: int) -> bool:
+        before, after = self.neighbours(wall_index)
+        if neighbour_index == after:
+            first, second = self.directions[wall_index], self.directions[neighbour_index]
+        else:
+            first, second = self.directions[neighbour_index], self.directions[wall_index]
+        return first[0] * second[1] - first[1] * second[0] < 0
 
     def build_rows(self):
         rows = []
@@ -159,12 +193,35 @@ class WallPositionSolver:
             weights.append(1.0 / BASE_SIGMA_M)
             used.append(observation)
 
-        gauge_rows = self.gauge_rows()
-        for row in gauge_rows:
+        for wall_index, position in self.wall_priors.items():
+            row = np.zeros(self.unknown_count())
+            row[wall_index] = 1.0
             rows.append(row)
-            targets.append(0.0)
-            weights.append(100.0)
+            targets.append(float(position))
+            weights.append(1.0 / WALL_PRIOR_SIGMA_M)
             used.append(None)
+
+        prior_count = 0
+        for photo_id, pose in self.poses.items():
+            if pose.prior is None:
+                continue
+
+            column = self.pose_column(photo_id)
+            for axis in range(2):
+                row = np.zeros(self.unknown_count())
+                row[column + axis] = 1.0
+                rows.append(row)
+                targets.append(float(pose.prior[axis]))
+                weights.append(1.0 / PRIOR_SIGMA_M)
+                used.append(None)
+            prior_count += 1
+
+        if prior_count == 0:
+            for row in self.gauge_rows():
+                rows.append(row)
+                targets.append(0.0)
+                weights.append(100.0)
+                used.append(None)
 
         return np.array(rows), np.array(targets), np.array(weights), used
 
@@ -230,6 +287,8 @@ class WallPositionSolver:
 
             for limit_wall in self.neighbours(observation.wall_index):
                 if abs(self.normals[limit_wall] @ self.normals[observation.wall_index]) > 0.5:
+                    continue
+                if not self.is_normal_corner(observation.wall_index, limit_wall):
                     continue
 
                 inside_distance = self.normals[limit_wall] @ room_point - self.wall_positions[limit_wall]

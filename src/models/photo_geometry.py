@@ -49,6 +49,7 @@ class PhotoGeometry(BaseModel):
     image_height: int
     fov_x_deg: float
     floor_found: bool
+    up_vector: list[float] = [0.0, -1.0, 0.0]
     camera_height_m: Optional[float] = None
     ceiling_height_m: Optional[float] = None
     walls: list[PhotoWall] = []
@@ -60,3 +61,16 @@ class PhotoGeometry(BaseModel):
 class RoomPhotoGeometry(BaseModel):
     room_name: str
     photos: list[PhotoGeometry]
+
+
+class PhotoPlacement(BaseModel):
+    photo_id: str
+    heading_deg: float
+    position: Point2D
+    depth_scale: float
+
+
+class RoomPlacements(BaseModel):
+    scale: float
+    wall_angle_deg: float
+    placements: list[PhotoPlacement]

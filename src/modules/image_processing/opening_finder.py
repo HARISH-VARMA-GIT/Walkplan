@@ -7,6 +7,7 @@ DETECTOR_NAME = "IDEA-Research/grounding-dino-tiny"
 SEGMENTER_NAME = "facebook/sam-vit-base"
 OPENING_WORDS = ["door", "window"]
 DUPLICATE_OVERLAP = 0.5
+MAX_BOX_SHARE = 0.4
 MAX_WALL_DISTANCE_M = 0.35
 
 VALID_SIZES = {
@@ -139,7 +140,14 @@ class OpeningFinder:
 
     def find_openings(self, image_rgb: np.ndarray) -> list:
         self.load_models()
-        detections = self.detector.find_boxes(image_rgb, OPENING_WORDS)
+        found = self.detector.find_boxes(image_rgb, OPENING_WORDS)
+        image_area = image_rgb.shape[0] * image_rgb.shape[1]
+
+        detections = []
+        for detection in found:
+            box = detection["box"]
+            if (box[2] - box[0]) * (box[3] - box[1]) <= MAX_BOX_SHARE * image_area:
+                detections.append(detection)
 
         for detection in detections:
             detection["mask"] = self.segmenter.segment(image_rgb, detection["box"])

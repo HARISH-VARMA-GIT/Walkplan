@@ -4,6 +4,7 @@ import open3d as o3d
 
 CAMERA_UP = np.array([0.0, -1.0, 0.0])
 FLOOR_MAX_TILT_DEG = 35
+FLOOR_MAX_TILT_WITH_HINT_DEG = 15
 CEILING_MAX_TILT_DEG = 15
 WALL_MAX_TILT_DEG = 15
 
@@ -94,16 +95,22 @@ class Surfaces:
 
 class SurfaceClassifier:
 
-    def classify(self, planes: list) -> Surfaces:
-        floor_limit = np.cos(np.radians(FLOOR_MAX_TILT_DEG))
+    def classify(self, planes: list, up_hint=None) -> Surfaces:
+        if up_hint is None:
+            reference_up = CAMERA_UP
+            floor_limit = np.cos(np.radians(FLOOR_MAX_TILT_DEG))
+        else:
+            reference_up = np.array(up_hint, dtype=float)
+            floor_limit = np.cos(np.radians(FLOOR_MAX_TILT_WITH_HINT_DEG))
+
         floor_candidates = []
 
         for plane in planes:
-            if plane.normal @ CAMERA_UP > floor_limit:
+            if plane.normal @ reference_up > floor_limit:
                 floor_candidates.append(plane)
 
         floor = self.pick_farthest(floor_candidates)
-        up = CAMERA_UP if floor is None else floor.normal
+        up = reference_up if floor is None else floor.normal
 
         ceiling_limit = np.cos(np.radians(CEILING_MAX_TILT_DEG))
         wall_limit = np.sin(np.radians(WALL_MAX_TILT_DEG))

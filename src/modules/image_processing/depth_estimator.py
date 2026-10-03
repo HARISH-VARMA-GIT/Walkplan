@@ -53,16 +53,20 @@ class DepthEstimator:
 
         return result
 
-    def estimate_with_cache(self, image_rgb: np.ndarray, cache_path: str) -> dict:
+    def estimate_with_cache(self, image_rgb: np.ndarray, cache_path: str, source_name: str = "") -> dict:
         if os.path.exists(cache_path):
             saved = np.load(cache_path)
-            result = {}
-            for key in saved.files:
-                result[key] = saved[key]
-            return result
+            saved_name = str(saved["source_name"]) if "source_name" in saved.files else ""
+
+            if saved_name == source_name and saved["points"].shape[:2] == image_rgb.shape[:2]:
+                result = {}
+                for key in saved.files:
+                    if key != "source_name":
+                        result[key] = saved[key]
+                return result
 
         result = self.estimate(image_rgb)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.savez_compressed(cache_path, **result)
+        np.savez_compressed(cache_path, source_name=np.array(source_name), **result)
 
         return result

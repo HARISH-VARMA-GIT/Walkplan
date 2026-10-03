@@ -126,7 +126,12 @@ class RoomAssembler:
         direction = direction / np.linalg.norm(direction)
         return np.array([direction[1], -direction[0]])
 
-    def add_photos_to_solver(self, solver: WallPositionSolver, photo_set: RoomPhotoGeometry, wall_indexes: dict, matches: dict):
+    def add_photos_to_solver(self, solver: WallPositionSolver, photo_set: RoomPhotoGeometry, wall_indexes: dict, matches: dict, placements=None):
+        placement_by_id = {}
+        if placements is not None:
+            for placement in placements.placements:
+                placement_by_id[placement.photo_id] = placement
+
         for photo in photo_set.photos:
             seen_walls = []
 
@@ -142,7 +147,11 @@ class RoomAssembler:
                     "end_points": [np.array(wall.start), np.array(wall.end)],
                 })
 
-            solver.add_photo(photo.photo_id, seen_walls)
+            placement = placement_by_id.get(photo.photo_id)
+            if placement is None:
+                solver.add_photo(photo.photo_id, seen_walls)
+            else:
+                solver.add_photo(photo.photo_id, seen_walls, math.radians(placement.heading_deg), placement.position)
 
     def build_walls(self, layout: RoomLayout, solver: WallPositionSolver) -> list:
         observed = solver.observed_walls()
@@ -316,7 +325,7 @@ class RoomAssembler:
 
         return self.interval(heights, 0.05)
 
-    def assemble(self, photo_set: RoomPhotoGeometry, layout: RoomLayout) -> dict:
+    def assemble(self, photo_set: RoomPhotoGeometry, layout: RoomLayout, placements=None) -> dict:
         self.notes = []
 
         if len(layout.walls) < 3:
@@ -327,10 +336,19 @@ class RoomAssembler:
             wall_indexes[wall_info.id] = index
 
         directions = self.wall_directions(layout)
-        matches = self.repair_matches(photo_set, layout, wall_indexes, directions)
-        self.repaired_matches = matches
+
+        if placements is None:
+            matches = self.repair_matches(photo_set, layout, wall_indexes, directions)
+        else:
+            matches = self.build_wall_matches(layout)
+
         solver = WallPositionSolver(directions)
-        self.add_photos_to_solver(solver, photo_set, wall_indexes, matches)
+        self.add_photos_to_solver(solver, photo_set, wall_indexes, matches, placements)
+
+        if placements is not None:
+            for index, wall_info in enumerate(layout.walls):
+                if wall_info.position_m is not None:
+                    solver.set_wall_prior(index, wall_info.position_m)
         solver.solve()
 
         walls = self.build_walls(layout, solver)

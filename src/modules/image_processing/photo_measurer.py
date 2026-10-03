@@ -14,12 +14,13 @@ MERGE_DISTANCE_M = 0.15
 CORNER_MIN_ANGLE_DEG = 60
 CORNER_REACH_M = 0.6
 BORDER_FRACTION = 0.03
+FLOOR_HINT_TOLERANCE_M = 0.25
 
 
 class FloorFrame:
 
-    def __init__(self, up: np.ndarray, floor_offset):
-        self.up = up / np.linalg.norm(up)
+    def __init__(self, up: np.ndarray, floor_offset=None):
+        self.up = np.array(up, dtype=float) / np.linalg.norm(up)
         self.floor_offset = floor_offset
 
         forward = np.array([0.0, 0.0, 1.0])
@@ -91,7 +92,28 @@ class PhotoMeasurer:
         self.plane_finder = PlaneFinder()
         self.classifier = SurfaceClassifier()
 
-    def measure(self, photo_id: str, image_path: str, depth: dict, ignore_mask=None) -> PhotoAnalysis:
+    def find_floor_offset(self, depth: dict, up_hint=None):
+        planes = self.plane_finder.find_planes(depth["points"], depth["mask"])
+        surfaces = self.classifier.classify(planes, up_hint)
+
+        if surfaces.floor is None:
+            return None
+        return float(surfaces.floor.offset)
+
+    def choose_floor_offset(self, surfaces, floor_offset_hint, notes: list):
+        own_offset = surfaces.floor.offset if surfaces.floor is not None else None
+
+        if own_offset is not None and (floor_offset_hint is None or abs(own_offset - floor_offset_hint) < FLOOR_HINT_TOLERANCE_M):
+            return own_offset
+
+        if floor_offset_hint is not None:
+            notes.append("floor height taken from the other photos")
+            return floor_offset_hint
+
+        notes.append("floor not found, heights are not reliable")
+        return None
+
+    def measure(self, photo_id: str, image_path: str, depth: dict, ignore_mask=None, up_hint=None, floor_offset_hint=None) -> PhotoAnalysis:
         points = depth["points"]
         mask = depth["mask"]
         intrinsics = depth["intrinsics"]
@@ -101,17 +123,14 @@ class PhotoMeasurer:
             mask = mask & ~ignore_mask
 
         planes = self.plane_finder.find_planes(points, mask)
-        surfaces = self.classifier.classify(planes)
-
-        floor_offset = surfaces.floor.offset if surfaces.floor is not None else None
-        frame = FloorFrame(surfaces.up, floor_offset)
+        surfaces = self.classifier.classify(planes, up_hint)
 
         notes = []
-        if surfaces.floor is None:
-            notes.append("floor not found, heights are not reliable")
+        floor_offset = self.choose_floor_offset(surfaces, floor_offset_hint, notes)
+        frame = FloorFrame(surfaces.up, floor_offset)
 
         wall_planes = self.merge_similar_planes(surfaces.walls)
-        wall_lines = self.keep_real_walls(wall_planes, frame, surfaces.floor is not None)
+        wall_lines = self.keep_real_walls(wall_planes, frame, floor_offset is not None)
         wall_lines = self.sort_and_name(wall_lines, image_width)
 
         corners = self.find_corners(wall_lines)
@@ -123,9 +142,10 @@ class PhotoMeasurer:
             image_width=image_width,
             image_height=image_height,
             fov_x_deg=math.degrees(2 * math.atan(0.5 / float(intrinsics[0, 0]))),
-            floor_found=surfaces.floor is not None,
+            floor_found=floor_offset is not None,
+            up_vector=[round(float(value), 5) for value in frame.up],
             camera_height_m=floor_offset,
-            ceiling_height_m=self.ceiling_height(surfaces),
+            ceiling_height_m=self.ceiling_height(surfaces, floor_offset),
             walls=self.to_photo_walls(wall_lines, image_width),
             corners=corners,
             notes=notes,
@@ -133,10 +153,10 @@ class PhotoMeasurer:
 
         return PhotoAnalysis(geometry, frame, wall_lines, intrinsics)
 
-    def ceiling_height(self, surfaces):
-        if surfaces.floor is None or surfaces.ceiling is None:
+    def ceiling_height(self, surfaces, floor_offset):
+        if floor_offset is None or surfaces.ceiling is None:
             return None
-        return float(surfaces.floor.offset + surfaces.ceiling.offset)
+        return float(floor_offset + surfaces.ceiling.offset)
 
     def merge_similar_planes(self, planes: list) -> list:
         merged = []

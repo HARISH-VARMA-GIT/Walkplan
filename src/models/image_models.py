@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,7 @@ class RoomWallInfo(BaseModel):
         description="Corner at the end of this wall (going clockwise). 'normal' = usual inside corner of the room. "
                     "'protruding' = a corner that sticks into the room, like the edge of an alcove or a pillar"
     )
+    position_m: Optional[float] = Field(default=None, description="Leave empty")
 
 
 class WallMatch(BaseModel):
