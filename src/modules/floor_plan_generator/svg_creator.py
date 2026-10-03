@@ -6,10 +6,16 @@ from utils.geometry import FloorPlanGeometry
 
 
 PX_PER_M = 100
-MARGIN_M = 1.0
+MARGIN_M = 1.4
 TITLE_HEIGHT_PX = 40
 DIM_OFFSET_M = 0.35
-OPENING_LABEL_OFFSET_M = 0.2
+DIM_STEP_M = 0.25
+DIM_TRIES = 4
+TAG_INWARD_M = [0.25, 0.5, 0.75, 1.0]
+TAG_SLIDE_M = [0.0, -0.3, 0.3, -0.6, 0.6]
+CHAR_WIDTH_PX = 6.8
+TEXT_HEIGHT_PX = 14
+LABEL_PADDING_PX = 3
 ROOM_FILLS = ["#EAF2FB", "#EEF7EC", "#FBF1E6", "#F3ECF8", "#E9F6F6", "#FBEFF1"]
 DAMAGE_COLOR = "#D9480F"
 DIM_COLOR = "#C0392B"
@@ -24,7 +30,7 @@ MARKER_SPACING_PX = 24
 
 class Canvas:
 
-    def __init__(self, plan: FloorPlan, geometry: FloorPlanGeometry, legend_rows: int = 0):
+    def __init__(self, plan: FloorPlan, geometry: FloorPlanGeometry, legend_sections: list = None):
         xs = []
         ys = []
 
@@ -39,14 +45,41 @@ class Canvas:
         self.plan_bottom = (max(ys) - min(ys) + 2 * MARGIN_M) * PX_PER_M + TITLE_HEIGHT_PX
         self.height = self.plan_bottom
 
-        if legend_rows > 0:
+        for row_count in legend_sections or []:
             self.width = max(self.width, LEGEND_MIN_WIDTH_PX)
-            self.height = self.plan_bottom + LEGEND_TITLE_PX + legend_rows * LEGEND_ROW_PX + 10
+            self.height += LEGEND_TITLE_PX + row_count * LEGEND_ROW_PX
+
+        if self.height > self.plan_bottom:
+            self.height += 10
 
     def to_screen(self, x: float, y: float) -> tuple:
         screen_x = (x - self.min_x) * PX_PER_M
         screen_y = (self.max_y - y) * PX_PER_M + TITLE_HEIGHT_PX
         return round(screen_x, 1), round(screen_y, 1)
+
+
+class LabelPlacer:
+
+    def __init__(self):
+        self.boxes = []
+
+    def text_box(self, x: float, y: float, text: str, vertical: bool = False, char_width: float = CHAR_WIDTH_PX) -> tuple:
+        half_width = len(text) * char_width / 2 + LABEL_PADDING_PX
+        half_height = TEXT_HEIGHT_PX / 2 + LABEL_PADDING_PX
+
+        if vertical:
+            half_width, half_height = half_height, half_width
+
+        return x - half_width, y - half_height, x + half_width, y + half_height
+
+    def is_free(self, box: tuple) -> bool:
+        for other in self.boxes:
+            if box[0] < other[2] and box[2] > other[0] and box[1] < other[3] and box[3] > other[1]:
+                return False
+        return True
+
+    def add(self, box: tuple):
+        self.boxes.append(box)
 
 
 class SvgCreator:
@@ -147,7 +180,18 @@ class SvgCreator:
                 f'data-wall="{wall.id}" data-room="{room.id}" data-length="{length:.3f}">'
                 f'<title>{wall.id}: {escape(label)}</title></line>')
 
-    def draw_dimension(self, canvas: Canvas, plan: FloorPlan, room: Room, wall: Wall) -> str:
+    def dimension_offsets(self, wall: Wall, is_shared: bool) -> list:
+        offsets = []
+
+        for step in range(DIM_TRIES):
+            if is_shared:
+                offsets.append(-0.3 - step * DIM_STEP_M)
+            else:
+                offsets.append(DIM_OFFSET_M + wall.thickness_m + step * DIM_STEP_M)
+
+        return offsets
+
+    def draw_dimension(self, canvas: Canvas, plan: FloorPlan, room: Room, wall: Wall, placer: LabelPlacer) -> str:
         neighbours = self.neighbour_rooms(plan, room, wall)
         is_shared = len(neighbours) > 0
 
@@ -157,16 +201,19 @@ class SvgCreator:
                 return ""
 
         out_x, out_y = self.outward_normal(room, wall)
+        label = self.format_length(wall.length, self.geometry.geometric_length(wall))
+        vertical = abs(wall.end[0] - wall.start[0]) < abs(wall.end[1] - wall.start[1])
 
-        if is_shared:
-            offset = -0.3
-        else:
-            offset = DIM_OFFSET_M + wall.thickness_m
+        for offset in self.dimension_offsets(wall, is_shared):
+            a = canvas.to_screen(wall.start[0] + out_x * offset, wall.start[1] + out_y * offset)
+            b = canvas.to_screen(wall.end[0] + out_x * offset, wall.end[1] + out_y * offset)
+            mid_x = round((a[0] + b[0]) / 2, 1)
+            mid_y = round((a[1] + b[1]) / 2, 1)
+            box = placer.text_box(mid_x, mid_y, label, vertical)
+            if placer.is_free(box):
+                break
 
-        a = canvas.to_screen(wall.start[0] + out_x * offset, wall.start[1] + out_y * offset)
-        b = canvas.to_screen(wall.end[0] + out_x * offset, wall.end[1] + out_y * offset)
-        mid_x = (a[0] + b[0]) / 2
-        mid_y = (a[1] + b[1]) / 2
+        placer.add(box)
 
         angle = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
         if angle > 90 or angle < -90:
@@ -175,16 +222,15 @@ class SvgCreator:
         tick = 6
         tick_x = out_x * tick
         tick_y = -out_y * tick
-        label = self.format_length(wall.length, self.geometry.geometric_length(wall))
 
         return (f'<g data-dim="{wall.id}">'
                 f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="{DIM_COLOR}" stroke-width="1"/>'
                 f'<line x1="{a[0] - tick_x}" y1="{a[1] - tick_y}" x2="{a[0] + tick_x}" y2="{a[1] + tick_y}" stroke="{DIM_COLOR}" stroke-width="1"/>'
                 f'<line x1="{b[0] - tick_x}" y1="{b[1] - tick_y}" x2="{b[0] + tick_x}" y2="{b[1] + tick_y}" stroke="{DIM_COLOR}" stroke-width="1"/>'
-                f'<text x="{mid_x}" y="{mid_y}" transform="rotate({angle:.1f} {mid_x} {mid_y}) translate(0 -4)" '
-                f'text-anchor="middle" font-size="12" fill="{DIM_COLOR}">{escape(label)}</text></g>')
+                f'<text class="halo" x="{mid_x}" y="{mid_y}" transform="rotate({angle:.1f} {mid_x} {mid_y})" '
+                f'text-anchor="middle" dominant-baseline="middle" font-size="12" fill="{DIM_COLOR}">{escape(label)}</text></g>')
 
-    def draw_opening(self, canvas: Canvas, room: Room, opening, drawn_doors: set) -> str:
+    def draw_opening(self, canvas: Canvas, room: Room, opening, drawn_doors: set, placer: LabelPlacer) -> str:
         wall = None
         for candidate in room.walls:
             if candidate.id == opening.wall_id:
@@ -230,13 +276,13 @@ class SvgCreator:
                 b = canvas.to_screen(far[0] + to_centre_x + out_x * shift, far[1] + to_centre_y + out_y * shift)
                 parts.append(f'<line x1="{a[0]}" y1="{a[1]}" x2="{b[0]}" y2="{b[1]}" stroke="{WINDOW_COLOR}" stroke-width="1.5"/>')
 
-        parts.append(self.draw_opening_label(canvas, opening, near, far, out_x, out_y, wall.thickness_m))
+        parts.append(self.draw_opening_tag(canvas, opening, near, far, (dir_x, dir_y), (out_x, out_y), wall.thickness_m, placer))
 
         return (f'<g data-opening="{opening.id}" data-type="{opening.type}" data-wall="{wall.id}" '
                 f'data-width="{opening.width.value:.3f}"><title>{escape(tip)}</title>{"".join(parts)}</g>')
 
-    def opening_label_text(self, opening) -> str:
-        text = f"{opening.id} {opening.width.value:.2f}"
+    def opening_size_text(self, opening) -> str:
+        text = f"{opening.width.value:.2f}"
 
         if opening.height is not None:
             text += f" × {opening.height.value:.2f}"
@@ -244,27 +290,70 @@ class SvgCreator:
         text += " m"
 
         if opening.type == "window" and opening.sill_height is not None:
-            text += f" (sill {opening.sill_height.value:.2f})"
+            text += f", sill {opening.sill_height.value:.2f} m"
 
         return text
 
-    def draw_opening_label(self, canvas: Canvas, opening, near: tuple, far: tuple, out_x: float, out_y: float, thickness: float) -> str:
-        inward = thickness / 2 + OPENING_LABEL_OFFSET_M
-        mid_x = (near[0] + far[0]) / 2 - out_x * inward
-        mid_y = (near[1] + far[1]) / 2 - out_y * inward
-        x, y = canvas.to_screen(mid_x, mid_y)
+    def opening_tag_spots(self, canvas: Canvas, near: tuple, far: tuple, direction: tuple, outward: tuple, thickness: float) -> list:
+        mid_x = (near[0] + far[0]) / 2
+        mid_y = (near[1] + far[1]) / 2
+        spots = []
 
-        start = canvas.to_screen(*near)
-        end = canvas.to_screen(*far)
-        angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
-        if angle > 90 or angle < -90:
-            angle += 180
+        for inward in TAG_INWARD_M:
+            for slide in TAG_SLIDE_M:
+                x = mid_x + direction[0] * slide - outward[0] * (thickness / 2 + inward)
+                y = mid_y + direction[1] * slide - outward[1] * (thickness / 2 + inward)
+                spots.append(canvas.to_screen(x, y))
 
+        return spots
+
+    def draw_opening_tag(self, canvas: Canvas, opening, near: tuple, far: tuple, direction: tuple, outward: tuple,
+                         thickness: float, placer: LabelPlacer) -> str:
+        spots = self.opening_tag_spots(canvas, near, far, direction, outward, thickness)
+        x, y = spots[0]
+        box = placer.text_box(x, y, opening.id)
+
+        for spot in spots:
+            spot_box = placer.text_box(spot[0], spot[1], opening.id)
+            if placer.is_free(spot_box):
+                x, y = spot
+                box = spot_box
+                break
+
+        placer.add(box)
         color = WINDOW_COLOR if opening.type == "window" else WALL_COLOR
-        text = escape(self.opening_label_text(opening))
 
-        return (f'<text x="{x}" y="{y}" transform="rotate({angle:.1f} {x} {y})" text-anchor="middle" '
-                f'dominant-baseline="middle" font-size="11" fill="{color}">{text}</text>')
+        return (f'<text class="halo" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="middle" font-size="12" '
+                f'font-weight="600" fill="{color}">{escape(opening.id)}</text>')
+
+    def opening_legend_text(self, plan: FloorPlan, room: Room, opening) -> str:
+        parts = [opening.id, opening.type, f"wall {opening.wall_id}", self.opening_size_text(opening)]
+
+        if len(plan.rooms) > 1:
+            parts.insert(0, room.name or room.id)
+
+        if opening.leads_to:
+            for other in plan.rooms:
+                if other.id == opening.leads_to:
+                    parts.append(f"to {other.name or other.id}")
+
+        return " · ".join(parts)
+
+    def opening_order(self, opening) -> tuple:
+        number = int(opening.id[1:]) if opening.id[1:].isdigit() else 0
+        return opening.type != "door", number, opening.id
+
+    def draw_opening_legend(self, plan: FloorPlan, top: float) -> tuple:
+        y = top + LEGEND_TITLE_PX - 8
+        rows = [f'<text x="12" y="{y}" font-size="13" font-weight="600" fill="{WALL_COLOR}">Doors and windows</text>']
+
+        for room in plan.rooms:
+            for opening in sorted(room.openings, key=self.opening_order):
+                y += LEGEND_ROW_PX
+                color = WINDOW_COLOR if opening.type == "window" else "#1F2D3D"
+                rows.append(f'<text x="12" y="{y}" font-size="11" fill="{color}">{escape(self.opening_legend_text(plan, room, opening))}</text>')
+
+        return f'<g id="opening-legend">{"".join(rows)}</g>', y + 8
 
     def draw_door_leaf(self, canvas: Canvas, room: Room, opening, near: tuple, far: tuple, out_x: float, out_y: float) -> list:
         if opening.swing == "left":
@@ -346,7 +435,7 @@ class SvgCreator:
 
         return x, y
 
-    def draw_damage(self, canvas: Canvas, room: Room, damage, placed: list) -> str:
+    def draw_damage(self, canvas: Canvas, room: Room, damage, placed: list, label_placer: LabelPlacer) -> str:
         tip = f"{damage.id} {damage.damage_class.replace('_', ' ')}: {self.damage_place_text(damage)}"
         if damage.description:
             tip += f" | {damage.description}"
@@ -354,6 +443,7 @@ class SvgCreator:
         x, y = canvas.to_screen(*self.damage_marker_point(room, damage))
         x, y = self.free_marker_spot(x, y, placed)
         placed.append((x, y))
+        label_placer.add((x - 12, y - 12, x + 12, y + 12))
         dashed = ' stroke="white" stroke-dasharray="3 2"' if damage.location_method != "measured" else ""
 
         return (f'<g data-damage="{damage.id}" data-class="{damage.damage_class}" data-surface="{damage.surface_type}" '
@@ -361,9 +451,9 @@ class SvgCreator:
                 f'<circle cx="{x}" cy="{y}" r="11" fill="{DAMAGE_COLOR}" fill-opacity="0.9"{dashed}/>'
                 f'<text x="{x}" y="{y + 4}" text-anchor="middle" font-size="10" fill="white" font-weight="bold">{escape(damage.id)}</text></g>')
 
-    def draw_damage_legend(self, canvas: Canvas, plan: FloorPlan) -> str:
+    def draw_damage_legend(self, plan: FloorPlan, top: float) -> str:
         rows = []
-        y = canvas.plan_bottom + LEGEND_TITLE_PX - 8
+        y = top + LEGEND_TITLE_PX - 8
         rows.append(f'<text x="12" y="{y}" font-size="13" font-weight="600" fill="{DAMAGE_COLOR}">Damage</text>')
 
         for room in plan.rooms:
@@ -385,7 +475,7 @@ class SvgCreator:
 
         return f'<g id="damage-legend">{"".join(rows)}</g>'
 
-    def draw_label(self, canvas: Canvas, room: Room) -> str:
+    def draw_label(self, canvas: Canvas, room: Room, placer: LabelPlacer) -> str:
         centre_x, centre_y = self.polygon_centre(room)
         x, y = canvas.to_screen(centre_x, centre_y)
 
@@ -398,6 +488,10 @@ class SvgCreator:
             subtitle += f" ±{area_half_width:.1f}"
         if room.ceiling_height is not None:
             subtitle += f" · h {room.ceiling_height.value:.2f} m"
+
+        widest = max(len(title) * 1.25, len(subtitle))
+        placer.add(placer.text_box(x, y - 5, "x" * int(widest)))
+        placer.add(placer.text_box(x, y + 14, subtitle))
 
         return (f'<g data-label-for="{room.id}"><text x="{x}" y="{y}" text-anchor="middle" font-size="15" '
                 f'font-weight="600" fill="#1F2D3D">{title}</text>'
@@ -415,12 +509,24 @@ class SvgCreator:
         return (f'<text x="12" y="24" font-size="14" font-weight="600" fill="#1F2D3D">'
                 f'{escape(plan.capture.id)} · tier: {plan.capture.tier} · total {total:.1f} m²</text>')
 
+    def style(self) -> str:
+        return ('<style>text.halo { paint-order: stroke; stroke: white; stroke-width: 4px; stroke-linejoin: round; }</style>')
+
     def create_svg(self, plan: FloorPlan) -> str:
         damage_count = 0
+        opening_count = 0
         for room in plan.rooms:
             damage_count += len(room.damage)
+            opening_count += len(room.openings)
 
-        canvas = Canvas(plan, self.geometry, damage_count)
+        legend_sections = []
+        if opening_count > 0:
+            legend_sections.append(opening_count)
+        if damage_count > 0:
+            legend_sections.append(damage_count)
+
+        canvas = Canvas(plan, self.geometry, legend_sections)
+        placer = LabelPlacer()
         drawn_doors = set()
         placed_markers = []
 
@@ -433,32 +539,40 @@ class SvgCreator:
 
         for index, room in enumerate(plan.rooms):
             rooms.append(self.draw_room(canvas, room, index))
-
+            labels.append(self.draw_label(canvas, room, placer))
             for wall in room.walls:
                 walls.append(self.draw_wall(canvas, room, wall))
-                dimensions.append(self.draw_dimension(canvas, plan, room, wall))
 
-            for opening in room.openings:
-                openings.append(self.draw_opening(canvas, room, opening, drawn_doors))
-
+        for room in plan.rooms:
             for damage in room.damage:
-                damages.append(self.draw_damage(canvas, room, damage, placed_markers))
+                damages.append(self.draw_damage(canvas, room, damage, placed_markers, placer))
 
-            labels.append(self.draw_label(canvas, room))
+        for room in plan.rooms:
+            for opening in room.openings:
+                openings.append(self.draw_opening(canvas, room, opening, drawn_doors, placer))
+
+        for room in plan.rooms:
+            for wall in room.walls:
+                dimensions.append(self.draw_dimension(canvas, plan, room, wall, placer))
 
         body = "\n".join([
+            self.style(),
             f'<g id="rooms">{"".join(rooms)}</g>',
             f'<g id="walls">{"".join(walls)}</g>',
             f'<g id="openings">{"".join(openings)}</g>',
-            f'<g id="damage">{"".join(damages)}</g>',
             f'<g id="dimensions">{"".join(dimensions)}</g>',
+            f'<g id="damage">{"".join(damages)}</g>',
             f'<g id="labels">{"".join(labels)}</g>',
             self.draw_scale_bar(canvas),
             self.draw_header(plan),
         ])
 
+        legend_top = canvas.plan_bottom
+        if opening_count > 0:
+            opening_legend, legend_top = self.draw_opening_legend(plan, legend_top)
+            body += "\n" + opening_legend
         if damage_count > 0:
-            body += "\n" + self.draw_damage_legend(canvas, plan)
+            body += "\n" + self.draw_damage_legend(plan, legend_top)
 
         return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas.width:.0f}" height="{canvas.height:.0f}" '
                 f'viewBox="0 0 {canvas.width:.0f} {canvas.height:.0f}" font-family="Helvetica, Arial, sans-serif" '
