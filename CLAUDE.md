@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Walkplan: generate floor plans from three input tiers — photos (2–8 stills per room, per-room folders, must stitch into whole-property plan), video (handheld iPhone 15+ walkthrough), LiDAR (depth + poses + intrinsics, Pro-class devices). Target output is Xactimate-compatible `.esx` (proprietary Verisk format; reverse-engineered from `esx sample downloadable.esx`). See `docs/spec.md` (requirements, test set, benchmark = LiDAR vs best competitor app), `docs/theory.md` (Xactimate/Magicplan/Encircle background), `docs/TODO.md`.
 
-Photo tier works end to end with MapAnything camera poses; not yet validated against tape measurements — see `docs/photo-pipeline.md`. Video tier (branch `features/video-processing`) reuses the photo pipeline on frames picked from the video and places spoken damage on the plan — see `docs/video-pipeline.md`. LiDAR `main.py` is a stub.
+Photo tier works end to end with MapAnything camera poses; not yet validated against tape measurements — see `docs/photo-pipeline.md`. Video tier (branch `features/video-processing`) reuses the photo pipeline on frames picked from the video and places spoken damage on the plan — see `docs/video-pipeline.md`. LiDAR tier builds a multi-room plan straight from the fused depth point cloud, with doors/windows from the RGB video — see `docs/lidar-pipeline.md`.
 
 ## Setup / Commands
 
@@ -21,15 +21,13 @@ Photo pipeline (outputs to `output/<room>/`; stages cached, edit `layout.json` a
 Video pipeline (one video per room folder; outputs to `output/<room>_video/`; transcript, damage list and frames cached):
 
 ```
-.venv\Scripts\python.exe srcpp.py --video src\inputsideosoom1 --room-type bedroom [--max-frames 24] [--redo-video] [--redo-photos] [--redo-layout]
+.venv\Scripts\python.exe src\app.py --video src\inputs\videos\room1 --room-type bedroom [--max-frames 24] [--redo-video] [--redo-photos] [--redo-layout]
 ```
 
-LiDAR scripts (Stray Scanner capture folder: `rgb.mp4`, `depth/`, `confidence/`, `camera_matrix.csv`, `odometry.csv`), run from `src/modules/lidar_processing/`:
+LiDAR pipeline (one Stray Scanner capture per folder: `rgb.mp4`, `depth/`, `confidence/`, `camera_matrix.csv`, `odometry.csv`; one or several rooms; outputs to `output/<name>_lidar/`; point cloud and door/window detections cached):
 
 ```
-python stray_to_3d.py ../../../data/single_room/<capture> --every 3   # -> mesh.ply, points.ply (--no-flip if mesh smeared)
-python measure_room.py ../../../data/single_room/<capture>            # -> room.json, room_plan.png (needs points.ply)
-```
+.venv\Scripts\python.exe src\app.py --lidar src\inputs\lidar\single_scan_with_ceiling [--room-type bedroom] [--redo-lidar] [--no-openings]
 
 `data/` (sample captures, zips) is gitignored.
 
@@ -38,11 +36,11 @@ python measure_room.py ../../../data/single_room/<capture>            # -> room.
 - `src/modules/<input>_processing/` — one high-level feature module per input tier.
 - `src/models/` — all pydantic schemas.
 - `src/utils/` — shared helpers.
-- LiDAR pipeline: `stray_to_3d.py` fuses depth + odometry into point cloud/mesh; `measure_room.py` works in ARKit world (y-up, gravity-aligned): floor/ceiling via height histogram, rotate to axis-aligned walls, wall lines from 1-D peaks, grid-cell room shape (handles L-shapes), polygon -> wall lengths + area.
+- LiDAR pipeline (`src/modules/lidar_processing/`): Stray poses are camera-to-world in OpenCV camera axes (no flip) → `point_cloud_builder.py` fuses depth (confidence 2, ≤4.5 m, ≤900 frames) into 2 cm voxels with normals from depth gradients → `plan_frame.py` floor/ceiling peaks + dominant wall angle; plan = (x, −z) rotated → `plan_grid.py` 5 cm free-space and wall-height rasters → `room_segmenter.py` wall lines (tall 1-D peaks), door gaps, barrier closed only along wall direction (≤1.1 m), free-space components = rooms (camera must enter), notch fill, pixel outline snapped to wall lines, jog removal → `opening_detector.py` low-motion keyframes turned upright, DINO+SAM → `opening_placer.py` ray cast onto walls (LiDAR depth picks the wall), cluster, windows only on outside walls, merge with wall-gap doors → `plan_builder.py` `FloorPlan` (per-room ceiling, wall thickness, leads_to/adjacency) → SVG + `plan_debug.png`.
 - Photo pipeline (`src/modules/image_processing/`): MapAnything poses (`pose_estimator.py`) → MoGe-2 depth → shared up/floor-height hints → Grounding DINO + SAM openings → RANSAC planes, per-photo wall distances/corners (`photo_geometry.json`) → `photo_placer.py` puts photos in one gravity/wall-aligned frame (`placements.json`) → `geometry_layout.py` clusters walls, carves free space on a grid, traces outline, removes small jogs (`layout.json`; `--layout llm` = old LLM path) → `WallPositionSolver` least squares (fixed headings, position priors) → `FloorPlan` → SVG (`src/modules/floor_plan_generator/`, helpers in `src/utils/geometry.py`).
 - Video pipeline (`src/modules/video_processing/`): ffmpeg audio → OpenAI `whisper-1` timed transcript → LLM damage mentions (`damage_finder.py`, ids X1..) → 2 fps candidate frames, sharpest per time slot + 2 per damage mention (`frame_selector.py`) → `ImageProcessingService.build_floor_plan_from_paths(..., damage_requests, damage_details)` → shared FOV from MapAnything fed to MoGe (one lens per video) → `DamageMeasurer` (DINO candidate boxes, vision LLM picks one in `damage_box_picker.py`, SAM, ray cast to wall/floor) → `RoomAssembler.build_damages` (wall + offset + height via solver pose) → SVG damage markers + legend. Several rooms in one video: `room_splitter.py` (rooms from speech) → each room run separately in `rooms/NN_name/` with 3 shared doorway frames → `room_aligner.py` (pose transform from shared frames) → `room_combiner.py` (90° snap, door snap, adjacency) → combined plan. `PoseEstimator` loads MapAnything on the meta device and streams weights to GPU (Windows commit memory is tight).
 - Floor plan schema: `src/models/floor_plan.py` (metres, x right / y up, walls clockwise or ccw closed loop, every number a `Measurement` with low/high).
-- Planned: validate vs tape; better door filtering / mirror masking; better damage detection; multi-room stitching for photos; test multi-room video; `.esx` export.
+- Planned: validate vs tape; better door filtering / mirror masking; better damage detection; multi-room stitching for photos; test multi-room video; LiDAR room labels (all rooms are `other` unless one room), interior-wall window filtering, LiDAR damage; `.esx` export.
 
 ## Code Style (from `docs/code-instructions.md`)
 

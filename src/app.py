@@ -12,6 +12,7 @@ os.environ.setdefault("HF_HOME", os.path.join(PROJECT_FOLDER, ".cache", "hugging
 os.environ.setdefault("TORCH_HOME", os.path.join(PROJECT_FOLDER, ".cache", "torch"))
 
 from modules.image_processing.main import ImageProcessingService
+from modules.lidar_processing.main import LidarProcessingService
 from modules.video_processing.main import VideoProcessingService
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -22,14 +23,18 @@ logger = logging.getLogger(__name__)
 class App:
 
     def read_arguments(self):
-        parser = argparse.ArgumentParser(description="Build a floor plan from room photos or a room video")
+        parser = argparse.ArgumentParser(description="Build a floor plan from room photos, a room video or a LiDAR scan")
         source = parser.add_mutually_exclusive_group(required=True)
         source.add_argument("--images", help="Folder with the photos of one room")
         source.add_argument("--video", help="Video file of one room, or a folder holding it")
-        parser.add_argument("--output", default=None, help="Output folder (default: output/<room name>, output/<room name>_video for videos)")
+        source.add_argument("--lidar", help="Folder with one Stray Scanner LiDAR capture (one or several rooms)")
+        parser.add_argument("--output", default=None,
+                            help="Output folder (default: output/<name>, output/<name>_video for videos, output/<name>_lidar for LiDAR)")
         parser.add_argument("--redo-photos", action="store_true", help="Measure the photos again (depth is still cached)")
         parser.add_argument("--redo-layout", action="store_true", help="Build the room layout again")
         parser.add_argument("--redo-video", action="store_true", help="Video only: transcribe, find damage and pick frames again")
+        parser.add_argument("--redo-lidar", action="store_true", help="LiDAR only: fuse the depth frames and look for doors and windows again")
+        parser.add_argument("--no-openings", action="store_true", help="LiDAR only: skip the camera search for doors and windows (faster, no GPU)")
         parser.add_argument("--max-frames", type=int, default=24, help="Video only: how many frames to use (default 24)")
         parser.add_argument("--layout", choices=["geometry", "llm"], default="geometry",
                             help="Photos only. geometry: walls from MapAnything camera poses (default). llm: vision model guesses the layout")
@@ -60,10 +65,27 @@ class App:
 
         logger.info("Floor plan saved to %s", result["svg_path"])
 
+    def run_lidar(self, arguments):
+        service = LidarProcessingService()
+        name = service.room_name_for(arguments.lidar)
+        output_folder = arguments.output or os.path.join(PROJECT_FOLDER, "output", f"{name}_lidar")
+
+        result = service.build_floor_plan(arguments.lidar, output_folder, arguments.room_type, arguments.redo_lidar,
+                                          not arguments.no_openings)
+
+        for room in result["floor_plan"]["rooms"]:
+            ceiling = room["ceiling_height"]["value"] if room["ceiling_height"] else None
+            logger.info("%s: %d walls, %.2f m2, ceiling %s m, %d openings", room["id"], len(room["walls"]),
+                        room["floor_area"]["value"], ceiling, len(room["openings"]))
+
+        logger.info("Floor plan saved to %s", result["svg_path"])
+
     def run(self):
         arguments = self.read_arguments()
 
-        if arguments.video:
+        if arguments.lidar:
+            self.run_lidar(arguments)
+        elif arguments.video:
             self.run_video(arguments)
         else:
             self.run_images(arguments)

@@ -6,6 +6,7 @@ Walkplan turns room captures into floor plans. Every output plan has walls, door
 |---|---|---|
 | **Photos** | One folder per room, about 8 photos taken from the middle of the room while turning clockwise | Room outline, doors, windows, ceiling height |
 | **Video** | One walkthrough video, where you talk about any damage. It can cover one room or several | The same, plus every damage you mention, placed on the plan with photos. Several rooms come out as one combined plan |
+| **LiDAR** | One [Stray Scanner](https://docs.strayrobots.io/apps/scanner/) capture from an iPhone/iPad Pro, one room or a whole flat | Rooms split automatically, wall lengths to about ±1 cm, doors, windows, a ceiling height per room, and which rooms connect |
 
 Accuracy has **not** been checked against tape measurements yet.
 
@@ -58,6 +59,7 @@ Put your captures under `src/inputs/` (see section 4), then:
 ```
 docker compose run --rm walkplan --images src/inputs/images/room1 --room-type bedroom
 docker compose run --rm walkplan --video src/inputs/videos/room1
+docker compose run --rm walkplan --lidar src/inputs/lidar/flat_scan
 ```
 
 Results appear in `output/` on your machine. The first run also downloads the models (~7 GB) into a Docker volume, so later runs start quickly.
@@ -115,9 +117,11 @@ Run:
 # Windows
 .venv\Scripts\python.exe src\app.py --images src\inputs\images\room1 --room-type bedroom
 .venv\Scripts\python.exe src\app.py --video src\inputs\videos\room1
+.venv\Scripts\python.exe src\app.py --lidar src\inputs\lidar\flat_scan
 
 # Linux
 .venv/bin/python src/app.py --video src/inputs/videos/room1
+.venv/bin/python src/app.py --lidar src/inputs/lidar/flat_scan
 ```
 
 ---
@@ -130,9 +134,14 @@ The `src/inputs/` folder is not in git; create it yourself:
 src/inputs/
 ├── images/
 │   └── room1/          ← photos of ONE room: 01.jpg … 08.jpg
-└── videos/
-    └── house_walk/     ← ONE video file per folder (mp4 / mov)
-        └── walk.mp4
+├── videos/
+│   └── house_walk/     ← ONE video file per folder (mp4 / mov)
+│       └── walk.mp4
+└── lidar/
+    └── flat_scan/      ← ONE Stray Scanner export (the folder may sit one level deeper)
+        ├── rgb.mp4
+        ├── depth/  confidence/
+        └── camera_matrix.csv  odometry.csv
 ```
 
 **Photos** (one folder per room):
@@ -145,6 +154,11 @@ src/inputs/
 2. **Damage:** stop, hold the damage in the **centre** of the frame for about 3 seconds, and say what it is while it is on screen ("water stain on this wall under the window").
 3. **Several rooms in one video:** say the room name as you enter each one ("now the kitchen"). Walk slowly through the doorway and film the door from both sides. Finish one room before moving to the next.
 
+**LiDAR** (Stray Scanner app on an iPhone/iPad Pro; export the capture and copy the folder):
+1. Keep the walls 1–2 m away and sweep each wall from floor to head height. Tilt up at the ceiling once per room, or its height is not reported.
+2. Walk into every room and through every doorway. Areas the camera never enters (balconies seen through glass) are left out.
+3. Move slowly; doors and windows are found in the video frames.
+
 ---
 
 ## 5. Commands
@@ -152,18 +166,22 @@ src/inputs/
 ```
 python src/app.py --images <folder> [options]
 python src/app.py --video  <folder or file> [options]
+python src/app.py --lidar  <folder> [options]
 ```
 
 | Option | Meaning |
 |---|---|
 | `--images <folder>` | Folder of photos of one room |
 | `--video <folder or file>` | A walkthrough video, or a folder holding one |
-| `--room-type bedroom` | Room label: `bedroom`, `kitchen`, `bathroom`, `living_room`, … For multi-room videos it is detected from speech |
-| `--output <folder>` | Where results go. Default: `output/<name>` for photos, `output/<name>_video` for videos |
+| `--lidar <folder>` | A Stray Scanner LiDAR capture (one or several rooms) |
+| `--room-type bedroom` | Room label: `bedroom`, `kitchen`, `bathroom`, `living_room`, … For multi-room videos it is detected from speech; multi-room LiDAR rooms are `other` |
+| `--output <folder>` | Where results go. Default: `output/<name>` for photos, `output/<name>_video` for videos, `output/<name>_lidar` for LiDAR |
 | `--max-frames 24` | Video only: frames used per room. More frames give better coverage but need more GPU memory; 25 fits on 8 GB |
 | `--redo-video` | Video only: transcribe, find damage and pick frames again |
 | `--redo-photos` | Measure the photos or frames again. Depth and camera poses stay cached |
 | `--redo-layout` | Rebuild the room outline |
+| `--redo-lidar` | LiDAR only: fuse the depth frames and search for doors and windows again |
+| `--no-openings` | LiDAR only: skip the camera search for doors and windows (fast, no GPU); open doorways are still found from the walls |
 | `--layout geometry\|llm` | Photos only. `geometry` (default) uses camera poses; `llm` lets a vision model guess the layout |
 
 Every step saves its result, so a second run on the same input only redoes what changed.
@@ -172,7 +190,7 @@ Every step saves its result, so a second run on the same input only redoes what 
 
 ## 6. Outputs
 
-In `output/<name>/` (photos) or `output/<name>_video/` (video):
+In `output/<name>/` (photos), `output/<name>_video/` (video) or `output/<name>_lidar/` (LiDAR):
 
 | File | What it is |
 |---|---|
@@ -183,6 +201,8 @@ In `output/<name>/` (photos) or `output/<name>_video/` (video):
 | `transcript.json`, `damage_mentions.json`, `rooms.json` | Video: what was said, the damage list and the room list taken from the speech |
 | `rooms/NN_name/` | Multi-room video: the full results for each room. The combined plan is in the top folder |
 | `layout.json` | Room outline. You can edit it by hand and re-run to rebuild the plan |
+| `plan_debug.png`, `points.ply` | LiDAR: top view of the point cloud with rooms and openings drawn on it, and the fused point cloud (open in MeshLab or CloudCompare) |
+| `openings/` | LiDAR: video frames with the doors and windows that were found |
 
 ---
 
@@ -205,10 +225,9 @@ In `output/<name>/` (photos) or `output/<name>_video/` (video):
 
 - [docs/photo-pipeline.md](docs/photo-pipeline.md): how the photo tier works, step by step
 - [docs/video-pipeline.md](docs/video-pipeline.md): video tier, damage and multi-room
+- [docs/lidar-pipeline.md](docs/lidar-pipeline.md): LiDAR tier, room splitting, doors and windows
 - [docs/spec.md](docs/spec.md): project goals and requirements
 - [CLAUDE.md](CLAUDE.md): short code map for developers
-
-LiDAR scripts (Stray Scanner captures) are in `src/modules/lidar_processing/`; see `CLAUDE.md` for their commands.
 
 ## Models and licences
 
