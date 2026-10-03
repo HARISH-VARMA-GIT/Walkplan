@@ -88,4 +88,5 @@ class PhotoPlacement(BaseModel):
 class RoomPlacements(BaseModel):
     scale: float
     wall_angle_deg: float
+    up: Optional[list[float]] = None
     placements: list[PhotoPlacement]

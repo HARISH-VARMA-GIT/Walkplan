@@ -169,4 +169,5 @@ class PhotoPlacer:
                 depth_scale=round(photo_scale, 4) if photo_scale is not None else scale,
             ))
 
-        return RoomPlacements(scale=round(scale, 4), wall_angle_deg=round(math.degrees(wall_angle), 2), placements=placements)
+        return RoomPlacements(scale=round(scale, 4), wall_angle_deg=round(math.degrees(wall_angle), 2),
+                              up=[round(float(value), 6) for value in up], placements=placements)

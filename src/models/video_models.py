@@ -22,12 +22,26 @@ class DamageMentionList(BaseModel):
     damages: list[DamageMention] = Field(description="Every separate damage the speaker talks about. Empty list if none")
 
 
+RoomLabel = Literal["bedroom", "bathroom", "kitchen", "living_room", "dining_room", "hallway", "closet",
+                    "laundry", "office", "garage", "stairs", "entry", "other"]
+
+
+class RoomMention(BaseModel):
+    start_seconds: float = Field(description="Time the speaker starts showing this room (0 for the first room)")
+    name: str = Field(description="Room name as the speaker calls it, e.g. 'master bedroom', 'room 2'")
+    room_type: RoomLabel = Field(description="Type of room")
+
+
+class RoomMentionList(BaseModel):
+    rooms: list[RoomMention] = Field(description="Rooms in the order they are filmed. One item if the video shows one room")
+
+
 class VideoFrame(BaseModel):
     photo_id: str
     file_name: str
     time_seconds: float
     sharpness: float
-    purpose: Literal["layout", "damage", "both"]
+    purpose: Literal["layout", "damage", "both", "transition"]
     damage_ids: list[str] = []
 
 

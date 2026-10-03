@@ -1,6 +1,8 @@
 import os
+import torch
 
 import numpy as np
+from moge.model.v2 import MoGeModel
 
 
 MOGE_MODEL_NAME = "Ruicheng/moge-2-vitl-normal"
@@ -17,8 +19,6 @@ class DepthEstimator:
         if self.model is not None:
             return
 
-        import torch
-        from moge.model.v2 import MoGeModel
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = MoGeModel.from_pretrained(self.model_name).to(self.device).eval()
@@ -27,13 +27,10 @@ class DepthEstimator:
         if self.model is None:
             return
 
-        import torch
-
         self.model = None
         torch.cuda.empty_cache()
 
     def estimate(self, image_rgb: np.ndarray, fov_x_deg: float = None) -> dict:
-        import torch
 
         self.load_model()
 

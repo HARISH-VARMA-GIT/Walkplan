@@ -1,7 +1,9 @@
 import numpy as np
+from PIL import Image
 
 from models.photo_geometry import PhotoOpening
-
+import torch
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, SamProcessor, SamModel
 
 DETECTOR_NAME = "IDEA-Research/grounding-dino-tiny"
 SEGMENTER_NAME = "facebook/sam-vit-base"
@@ -19,17 +21,12 @@ VALID_SIZES = {
 class ObjectDetector:
 
     def __init__(self, model_name: str = DETECTOR_NAME):
-        import torch
-        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.processor = AutoProcessor.from_pretrained(model_name)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name).to(self.device).eval()
 
     def find_boxes(self, image_rgb: np.ndarray, words: list, box_threshold=0.3, text_threshold=0.25) -> list:
-        import torch
-        from PIL import Image
-
         height, width = image_rgb.shape[:2]
         text = ". ".join(words) + "."
 
@@ -102,16 +99,12 @@ class ObjectDetector:
 class ObjectSegmenter:
 
     def __init__(self, model_name: str = SEGMENTER_NAME):
-        import torch
-        from transformers import SamModel, SamProcessor
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.processor = SamProcessor.from_pretrained(model_name)
         self.model = SamModel.from_pretrained(model_name).to(self.device).eval()
 
     def segment(self, image_rgb: np.ndarray, box: list) -> np.ndarray:
-        import torch
-        from PIL import Image
 
         inputs = self.processor(Image.fromarray(image_rgb), input_boxes=[[box]], return_tensors="pt").to(self.device)
 
@@ -137,6 +130,16 @@ class OpeningFinder:
         if self.detector is None:
             self.detector = ObjectDetector()
             self.segmenter = ObjectSegmenter()
+
+    def unload_models(self):
+        if self.detector is None:
+            return
+
+        import torch
+
+        self.detector = None
+        self.segmenter = None
+        torch.cuda.empty_cache()
 
     def find_openings(self, image_rgb: np.ndarray) -> list:
         self.load_models()

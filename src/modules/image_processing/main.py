@@ -214,12 +214,26 @@ class ImageProcessingService:
 
     def estimate_all_poses(self, image_paths: list, output: OutputFolder) -> list:
         logger.info("Camera poses for %d photos (MapAnything)", len(image_paths))
+        self.opening_finder.unload_models()
+        self.depth_estimator.unload_model()
         cache_paths = [output.pose_path(self.photo_id(index)) for index in range(len(image_paths))]
 
         poses = self.pose_estimator.estimate_with_cache(image_paths, cache_paths)
         self.pose_estimator.unload_model()
 
         return poses
+
+    def without_walls(self, photo_set: RoomPhotoGeometry, photo_ids: list) -> RoomPhotoGeometry:
+        trimmed = photo_set.model_copy(deep=True)
+
+        for photo in trimmed.photos:
+            if photo.photo_id in photo_ids:
+                photo.walls = []
+                photo.corners = []
+                photo.openings = []
+
+        logger.info("Pose only (no walls used): %s", sorted(photo_ids))
+        return trimmed
 
     def shared_fov_from_poses(self, poses: list) -> float:
         fovs = [float(pose["fov_x_deg"]) for pose in poses if "fov_x_deg" in pose]
@@ -263,7 +277,7 @@ class ImageProcessingService:
     def build_floor_plan_from_paths(self, image_paths: list, room_name: str, output_folder: str, redo_photos: bool = False,
                                     redo_layout: bool = False, layout_mode: str = "geometry", room_type: str = "other",
                                     capture_tier: str = "photos", damage_requests: dict = None, damage_details: dict = None,
-                                    shared_fov: bool = False) -> dict:
+                                    shared_fov: bool = False, pose_only_photo_ids: list = None) -> dict:
         output = OutputFolder(output_folder)
         self.fov_x_deg = None
 
@@ -280,6 +294,9 @@ class ImageProcessingService:
         else:
             logger.info("Using saved %s", output.photo_geometry_path)
             photo_set = RoomPhotoGeometry.model_validate(output.load_json(output.photo_geometry_path))
+
+        if pose_only_photo_ids:
+            photo_set = self.without_walls(photo_set, pose_only_photo_ids)
 
         placements = None
         if layout_mode == "geometry":
@@ -315,4 +332,8 @@ class ImageProcessingService:
             "output_folder": output_folder,
             "floor_plan": plan.model_dump(mode="json"),
             "svg_path": output.svg_path,
+            "room": assembled["room"].model_dump(mode="json"),
+            "notes": assembled["notes"],
+            "placements": placements,
+            "poses": poses,
         }

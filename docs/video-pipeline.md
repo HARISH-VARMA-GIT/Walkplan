@@ -49,11 +49,12 @@ Same venv as the photo tier (`.venv\Scripts\python.exe -m pip install -r require
 
 ## 3. Recording the video
 
-1. Use landscape, the 0.5× ultra-wide lens, and walk slowly. One room per video, about 1–2 minutes.
+1. Use landscape, the 0.5× ultra-wide lens, and walk slowly. About 1–2 minutes per room. One video can cover several rooms (see section 7).
 2. Start facing the entrance door, then walk **clockwise** around the room about 1 m from the walls. Point the camera at the walls with some floor visible. Every wall, door and window should be on screen at some point.
 3. **For each damage, stop.** Hold the camera 1–2 m away with the damage in the **centre** of the frame for about 3 seconds, and say what it is and where it is *while it is on screen*: "Water stain on this wall, under the window, about 30 cm wide."
 4. Speak clearly; any language Whisper understands works.
-5. Put the file in its own folder per room: `src/inputs/videos/<room>/<file>.mp4`.
+5. Put the file in its own folder: `src/inputs/videos/<name>/<file>.mp4`.
+6. **Several rooms in one video:** say the room name as you enter each room ("now the kitchen"). Walk slowly through the doorway and film the connecting door from both sides. Finish one room completely before moving to the next.
 
 ---
 
@@ -89,7 +90,10 @@ Caching: `transcript.json`, `damage_mentions.json` and `frames.json` are reused 
 | Floor plan | `image_processing/main.py` `build_floor_plan_from_paths(..., capture_tier="video", damage_requests, damage_details)` | everything from the photo tier |
 | Shared FOV | `image_processing/main.py` `shared_fov_from_poses` (MapAnything intrinsics), `DepthEstimator.estimate(..., fov_x_deg)` | log line "Same camera for all frames" |
 | Damage in a frame | `image_processing/damage_measurer.py` `DamageMeasurer`, `damage_box_picker.py` `DamageBoxPicker` (prompt `DAMAGE_BOX_PROMPT`) | `photo_geometry.json` → `damages` per photo, `damage/X1_P07.jpg` |
-| Damage on the plan | `image_processing/room_assembler.py` `build_damages` | `floor_plan.json` → `rooms[0].damage` |
+| Damage on the plan | `image_processing/room_assembler.py` `build_damages` | `floor_plan.json` → `rooms[i].damage` |
+| Rooms from speech | `video_processing/room_splitter.py` `RoomSplitter` (prompt `ROOM_SPLIT_PROMPT`) | `rooms.json` |
+| Lining up rooms | `video_processing/room_aligner.py` `ChunkAligner` (shared doorway frames → rotation, shift, scale) | log line "aligned with N shared frames" |
+| Combined plan | `video_processing/room_combiner.py` `RoomCombiner` (camera fit, 90° snap, door snap, door links) | top-level `floor_plan.json` / `.svg` |
 | Drawing | `floor_plan_generator/svg_creator.py` `draw_damage`, `draw_damage_legend` | `floor_plan.svg` |
 
 Ported from humantic `deep_process`, rewritten as classes: ffmpeg helpers, audio extraction, `pts_time` frame timestamps from `showinfo`, and the timed-transcript prompt format with the BEGIN/END DATA guard.
@@ -122,7 +126,24 @@ In the SVG, each damage is a red circle with its id, placed inside the room next
 
 ---
 
-## 7. Known limitations
+## 7. Several rooms in one video
+
+1. **Rooms from speech.** An LLM reads the transcript and lists each room with its start time (`rooms.json`). If no second room is mentioned, the video is treated as one room (sections 1–6). Rooms shorter than 8 s are merged into the previous one.
+2. **Frames per room.** Each room gets up to `--max-frames` frames from its own time range, plus its damage frames. At each room change, the 3 sharpest frames within ±3 s go into **both** rooms. These doorway frames link the rooms. They are used for camera poses only: their walls are left out of each room's outline, so the next room's walls don't leak in.
+3. **One room at a time.** Each room runs through the full pipeline in `rooms/<NN_name>/`, with its own MapAnything run. That keeps GPU memory at about 25 frames.
+4. **Line up.** Each doorway frame has a camera pose in both room runs. Together they give the rotation, shift and scale between the two rooms (`ChunkAligner`). If the frames disagree by more than 15°, that room is drawn beside the others and a note says so.
+5. **Place each room.** Camera positions are converted into the first room's plan frame and fitted with a turn snapped to 90° plus a shift. Then, if a door in this room faces a door in an already placed room within 1.2 m, the room is shifted so the two doors line up one wall thickness apart. This fixes the ~0.3 m position error left after alignment.
+6. **Connections.** Doors within 0.4 m of each other in two rooms become an `adjacency` entry and get `leads_to` set. Opening ids get a room prefix (`R2-D1`).
+
+Outputs: the combined `floor_plan.json` and `floor_plan.svg` at the top of the output folder, each room's full outputs in `rooms/<NN_name>/`, and `rooms.json`.
+
+Tested by splitting the room1 video frames into two overlapping halves and aligning them: the shared frames agree within 6° and scale 1.002, and camera positions land within about 0.3 m. A real two-room video has not been tested yet. A test with the room1 and room2 videos joined end to end ran through every step (3 rooms because Whisper misheard "second room" as "third room"; the two room2 parts overlap as they should). It cannot check room-to-room placement, because the join is a cut, not a walk through a doorway.
+
+Memory: between rooms, Grounding DINO, SAM and MoGe are unloaded before MapAnything runs. MapAnything weights are read tensor by tensor from the file (`SafetensorsReader`), so it can be loaded again for each room without running out of Windows commit memory.
+
+---
+
+## 8. Known limitations
 
 - **Damage detection:** DINO has to propose a box on the damage for a `measured` position. Faint marks may only get a grid cell (`estimated`). The `damage/*.jpg` stills show what was picked, and the log lists the LLM's reason.
 - **Camera height swings when the phone tilts** (1.0–2.3 m on room1). The MapAnything pose height follows the phone's pitch, so damage and opening heights from tilted frames can be off by a few tens of cm.

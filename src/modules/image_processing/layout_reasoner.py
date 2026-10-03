@@ -15,7 +15,7 @@ class LayoutReasoner:
         self.image_converter = ImageConverter()
         self.llm_client = LlmClient(
             model_env_name="LLM_LAYOUT_MODEL_CHAIN",
-            default_models="gpt-5.5,gpt-4.1",
+            default_models="gpt-4.1,gpt-4o",
             timeout=600,
             max_tokens=32000,
         )

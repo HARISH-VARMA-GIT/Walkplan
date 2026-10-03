@@ -136,7 +136,7 @@ Tested on a synthetic L-shaped room with 6 walls (5, 2, 2, 2, 3, 4 m): with up t
 - **Door detections are noisy:** wardrobe doors, curtains and glass doors become extra "doors" (room1 currently lists several on one wall). Most are flagged `size outside normal range`. Needs better filtering, or the LLM to label them.
 - **Step/alcove side faces** that no photo looks at are placed from the outline only (`estimated`, wider ±).
 - **Mirrors** are not masked yet. Fake depth behind a mirror can push a wall line out.
-- Manhattan rooms only (90° corners). Single room, no multi-room stitching. No damage detection.
+- Manhattan rooms only (90° corners). Multi-room stitching only for the video tier (`docs/video-pipeline.md` section 7). Damage only from video.
 - GPU: needs about 8 GB. Each model is unloaded before the next one loads.
 
 ---

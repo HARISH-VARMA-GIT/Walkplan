@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import imageio_ffmpeg
 
 
 class FfmpegRunner:
@@ -19,7 +20,6 @@ class FfmpegRunner:
             return on_path
 
         try:
-            import imageio_ffmpeg
             return imageio_ffmpeg.get_ffmpeg_exe()
         except ImportError:
             raise RuntimeError("ffmpeg not found. Install it (winget install ffmpeg) or pip install imageio-ffmpeg, or set FFMPEG_PATH")

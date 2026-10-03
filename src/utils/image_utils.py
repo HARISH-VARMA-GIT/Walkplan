@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import numpy as np
 
 from PIL import Image, ImageOps
 
@@ -45,7 +46,6 @@ class ImageConverter:
             return buffer.getvalue()
 
     def load_rgb_array(self, image_path: str, max_side_pixels: int = 1600):
-        import numpy as np
 
         with Image.open(image_path) as image:
             image = ImageOps.exif_transpose(image)

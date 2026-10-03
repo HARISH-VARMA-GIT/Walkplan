@@ -1,10 +1,54 @@
 import math
 import os
-
+import torch
+import json
 import numpy as np
-
+from huggingface_hub import hf_hub_download
+from mapanything.models import MapAnything
+from mapanything.utils.image import load_images
 
 MAPANYTHING_MODEL_NAME = "facebook/map-anything-apache"
+SAFETENSORS_TYPES = {
+    "F32": torch.float32,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+}
+
+
+class SafetensorsReader:
+
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def read_all(self, device) -> dict:
+        tensors = {}
+
+        with open(self.file_path, "rb") as weights_file:
+            header_size = int.from_bytes(weights_file.read(8), "little")
+            header = json.loads(weights_file.read(header_size))
+            data_start = 8 + header_size
+
+            for name, info in header.items():
+                if name == "__metadata__":
+                    continue
+
+                begin, end = info["data_offsets"]
+                weights_file.seek(data_start + begin)
+                data = bytearray(weights_file.read(end - begin))
+                dtype = SAFETENSORS_TYPES[info["dtype"]]
+
+                if data:
+                    tensor = torch.frombuffer(data, dtype=dtype)
+                else:
+                    tensor = torch.empty(0, dtype=dtype)
+
+                tensors[name] = tensor.reshape(info["shape"]).to(device)
+
+        return tensors
 
 
 class PoseEstimator:
@@ -18,19 +62,12 @@ class PoseEstimator:
         if self.model is not None:
             return
 
-        import torch
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = self.build_model_low_memory().eval()
 
     def build_model_low_memory(self):
-        import json
-
-        import torch
-        from huggingface_hub import hf_hub_download
-        from mapanything.models import MapAnything
-        from safetensors import safe_open
-
+        
         config_path = hf_hub_download(self.model_name, "config.json")
         weights_path = hf_hub_download(self.model_name, "model.safetensors")
 
@@ -43,11 +80,7 @@ class PoseEstimator:
         with torch.device("meta"):
             model = MapAnything(**config)
 
-        weights = {}
-        with safe_open(weights_path, framework="pt", device="cpu") as weights_file:
-            for name in weights_file.keys():
-                weights[name] = weights_file.get_tensor(name).to(self.device)
-
+        weights = SafetensorsReader(weights_path).read_all(self.device)
         model.load_state_dict(weights, strict=False, assign=True)
 
         for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
@@ -59,15 +92,11 @@ class PoseEstimator:
     def unload_model(self):
         if self.model is None:
             return
-
-        import torch
-
+        
         self.model = None
         torch.cuda.empty_cache()
 
     def estimate(self, image_paths: list) -> list:
-        import torch
-        from mapanything.utils.image import load_images
 
         self.load_model()
         views = load_images(image_paths)
