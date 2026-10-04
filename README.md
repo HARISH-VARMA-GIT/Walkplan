@@ -146,9 +146,9 @@ src/inputs/
 **Docker:**
 
 ```
-docker compose run --rm walkplan --images src/inputs/images/room1 --room-type bedroom
-docker compose run --rm walkplan --video src/inputs/videos/house_walk
-docker compose run --rm walkplan --lidar src/inputs/lidar/flat_scan
+docker compose run -it --rm walkplan --images src/inputs/images/room1 --room-type bedroom
+docker compose run -it --rm walkplan --video src/inputs/videos/house_walk
+docker compose run -it --rm walkplan --lidar src/inputs/lidar/flat_scan
 ```
 
 **Local Python:**
