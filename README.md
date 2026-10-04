@@ -1,6 +1,6 @@
 # Walkplan 🤳
 
-Walkplan turns room captures into floor plans. Every output plan has walls, doors, windows, ceiling height and, for videos, the spoken damage marked on the walls. Each plan is saved as `floor_plan.json` plus a `floor_plan.svg` you can open in a browser.
+Walkplan turns room captures into floor plans. Every output plan has walls, doors, windows and ceiling height, and for videos also the spoken damage marked on the walls. Each plan is saved as `floor_plan.json` plus a `floor_plan.svg` you can open in a browser.
 
 | Input | What you give it | What you get |
 |---|---|---|
@@ -8,23 +8,28 @@ Walkplan turns room captures into floor plans. Every output plan has walls, door
 | **Video** | One walkthrough video, where you talk about any damage. It can cover one room or several | The same, plus every damage you mention, placed on the plan with photos. Several rooms come out as one combined plan |
 | **LiDAR** | One [Stray Scanner](https://docs.strayrobots.io/apps/scanner/) capture from an iPhone/iPad Pro, one room or a whole flat | Rooms split automatically, wall lengths to about ±1 cm, doors, windows, a ceiling height per room, and which rooms connect |
 
-Accuracy has **not** been checked against tape measurements yet.
+Accuracy results against tape measurements are in the reports (section 3).
+
+**Contents**
+1. [Installation and code setup](#1-installation-and-code-setup)
+2. [Capturing and running](#2-capturing-and-running)
+3. [Reports and analysis](#3-reports-and-analysis)
+4. [Outputs and measurements](#4-outputs-and-measurements)
 
 ---
 
-## 1. What you need
+## 1. Installation and code setup
+
+### 1.1 What you need
 
 - **An NVIDIA GPU with at least 8 GB of memory**, and a recent driver: version 580 or newer, because the code uses CUDA 13 PyTorch. Check with `nvidia-smi`.
-- **An OpenAI API key.** It is used for speech-to-text and for finding damage in videos, and for the optional `--layout llm` mode for photos.
+- **An OpenAI API key.** It is used for speech-to-text and finding damage in videos, and for the optional `--layout llm` mode for photos.
 - **About 25 GB of free disk space:** the Docker image is roughly 15 GB, and the AI models download another ~7 GB on first run.
-- Then **either Docker (section 2, recommended)** or **Python 3.11 (section 3)**.
+- Then **either Docker (1.2, recommended)** or **Python 3.11 (1.3)**.
 
----
+### 1.2 Setup with Docker (recommended)
 
-## 2. Setup with Docker (recommended)
-
-### 2.1 Install Docker with GPU support
-
+**Install Docker with GPU support:**
 - **Windows:** install [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the WSL 2 backend. GPU support is built in when your NVIDIA driver is up to date.
 - **Linux:** install Docker Engine and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
@@ -34,7 +39,7 @@ Check that Docker can see the GPU:
 docker run --rm --gpus all ubuntu nvidia-smi
 ```
 
-### 2.2 Get the code and add your API key
+**Get the code and add your API key:**
 
 ```
 git clone <repo-url> walkplan
@@ -44,30 +49,10 @@ cp .env.example .env        # Windows PowerShell: copy .env.example .env
 
 Open `.env` and set `OPENAI_API_KEY=sk-...`. Leave the `HF_HOME` / `TORCH_HOME` lines commented out when using Docker.
 
-### 2.3 Build the image
+**Build the image** (the first build takes 10–30 minutes):
 
 ```
 docker compose build
-```
-
-The first build takes 10–30 minutes, because it downloads PyTorch and the other packages.
-
-### 2.4 Run
-
-Put your captures under `src/inputs/` (see section 4), then:
-
-```
-docker compose run --rm walkplan --images src/inputs/images/room1 --room-type bedroom
-docker compose run --rm walkplan --video src/inputs/videos/room1
-docker compose run --rm walkplan --lidar src/inputs/lidar/flat_scan
-```
-
-Results appear in `output/` on your machine. The first run also downloads the models (~7 GB) into a Docker volume, so later runs start quickly.
-
-Show all options:
-
-```
-docker compose run --rm walkplan --help
 ```
 
 <details>
@@ -85,9 +70,7 @@ docker run --rm --gpus all --env-file .env \
 In Windows PowerShell, use `${PWD}` instead of `$(pwd)` and put the whole command on one line.
 </details>
 
----
-
-## 3. Setup without Docker (local Python)
+### 1.3 Setup without Docker (local Python)
 
 You need **Python 3.11** and **ffmpeg** on PATH. On Windows, `winget install ffmpeg` installs it; on Ubuntu, `sudo apt install ffmpeg git`.
 
@@ -106,27 +89,27 @@ python3.11 -m venv .venv
 cp .env.example .env        # then set OPENAI_API_KEY
 ```
 
-Run every command **from the repo root**, because `requirements.txt` installs MoGe from `./src/MoGe`.
-
+- Run every command **from the repo root**, because `requirements.txt` installs MoGe from `./src/MoGe`.
 - Do not install `opencv-python` next to `opencv-python-headless`; they clash.
 - Models are cached in `<repo>/.cache/`.
 
-Run:
+### 1.4 Troubleshooting installation
 
-```
-# Windows
-.venv\Scripts\python.exe src\app.py --images src\inputs\images\room1 --room-type bedroom
-.venv\Scripts\python.exe src\app.py --video src\inputs\videos\room1
-.venv\Scripts\python.exe src\app.py --lidar src\inputs\lidar\flat_scan
-
-# Linux
-.venv/bin/python src/app.py --video src/inputs/videos/room1
-.venv/bin/python src/app.py --lidar src/inputs/lidar/flat_scan
-```
+| Problem | Fix |
+|---|---|
+| `could not select device driver "nvidia"` / no GPU in Docker | Install the NVIDIA Container Toolkit (Linux) or update Docker Desktop and the NVIDIA driver (Windows). Check with `docker run --rm --gpus all ubuntu nvidia-smi` |
+| `CUDA driver version is insufficient` | Update the NVIDIA driver to 580 or newer |
+| Model download fails with a memory error | Add `HF_HUB_DISABLE_XET=1` to `.env` and run again; downloads resume |
+| `ffmpeg not found` (local setup) | Install ffmpeg, or set `FFMPEG_PATH` in `.env` |
+| `cv2` errors (local setup) | `pip uninstall opencv-python opencv-python-headless`, then `pip install opencv-python-headless==4.10.0.84` |
 
 ---
 
-## 4. Preparing your captures
+## 2. Capturing and running
+
+> **Follow the step-by-step capture manual: [docs/capture-and-run-manual.md](docs/capture-and-run-manual.md).** It covers which app to install, phone settings, how to take the photos (order and turning), how to record the video and LiDAR scan, how to move the files to the computer, and the exact command to run. Below is a short summary.
+
+### 2.1 Where to put the captures
 
 The `src/inputs/` folder is not in git; create it yourself:
 
@@ -138,36 +121,50 @@ src/inputs/
 │   └── house_walk/     ← ONE video file per folder (mp4 / mov)
 │       └── walk.mp4
 └── lidar/
-    └── flat_scan/      ← ONE Stray Scanner export (the folder may sit one level deeper)
+    └── flat_scan/      ← ONE Stray Scanner export, unzipped (the folder may sit one level deeper)
         ├── rgb.mp4
         ├── depth/  confidence/
         └── camera_matrix.csv  odometry.csv
 ```
 
-**Photos** (one folder per room):
-1. Stand near the middle of the room. Photo 1 faces the entrance door.
-2. Turn **clockwise** about 45° per photo, 8 photos in total. Hold the phone level, in landscape, on the 0.5× ultra-wide lens.
-3. Send the original files, not WhatsApp copies, which lose quality.
+### 2.2 Capture in short
 
-**Video:**
-1. Landscape, 0.5× lens. Walk slowly around the room about 1 m from the walls, so every wall, door and window is on screen at some point.
-2. **Damage:** stop, hold the damage in the **centre** of the frame for about 3 seconds, and say what it is while it is on screen ("water stain on this wall under the window").
-3. **Several rooms in one video:** say the room name as you enter each one ("now the kitchen"). Walk slowly through the doorway and film the door from both sides. Finish one room before moving to the next.
+- **Photos:**
+  1. Stand in the middle of the room. Photo 1 faces the entrance door.
+  2. Turn **clockwise** about 45° per photo, 8 photos in total.
+  3. Use landscape and the 0.5× lens, and send the original files.
+- **Video:**
+  1. Use landscape and the 0.5× lens, and walk slowly about 1 m from the walls.
+  2. For each damage, stop with it in the centre of the frame and say what it is.
+  3. For several rooms, say each room's name as you enter it.
+- **LiDAR:**
+  1. Install Stray Scanner and record all rooms in **one** continuous recording.
+  2. Walk into every room and tilt up at each ceiling once.
 
-**LiDAR** (Stray Scanner app on an iPhone/iPad Pro; export the capture and copy the folder):
-1. Keep the walls 1–2 m away and sweep each wall from floor to head height. Tilt up at the ceiling once per room, or its height is not reported.
-2. Walk into every room and through every doorway. Areas the camera never enters (balconies seen through glass) are left out.
-3. Move slowly; doors and windows are found in the video frames.
+### 2.3 Run (one command per capture)
 
----
-
-## 5. Commands
+**Docker:**
 
 ```
-python src/app.py --images <folder> [options]
-python src/app.py --video  <folder or file> [options]
-python src/app.py --lidar  <folder> [options]
+docker compose run --rm walkplan --images src/inputs/images/room1 --room-type bedroom
+docker compose run --rm walkplan --video src/inputs/videos/house_walk
+docker compose run --rm walkplan --lidar src/inputs/lidar/flat_scan
 ```
+
+**Local Python:**
+
+```
+# Windows
+.venv\Scripts\python.exe src\app.py --images src\inputs\images\room1 --room-type bedroom
+.venv\Scripts\python.exe src\app.py --video src\inputs\videos\house_walk
+.venv\Scripts\python.exe src\app.py --lidar src\inputs\lidar\flat_scan
+
+# Linux
+.venv/bin/python src/app.py --video src/inputs/videos/house_walk
+.venv/bin/python src/app.py --lidar src/inputs/lidar/flat_scan
+```
+
+The first run also downloads the models (~7 GB), so later runs start quickly. Every step saves its result, so a second run on the same input only redoes what changed.
 
 | Option | Meaning |
 |---|---|
@@ -184,17 +181,13 @@ python src/app.py --lidar  <folder> [options]
 | `--no-openings` | LiDAR only: skip the camera search for doors and windows (fast, no GPU); open doorways are still found from the walls |
 | `--layout geometry\|llm` | Photos only. `geometry` (default) uses camera poses; `llm` lets a vision model guess the layout |
 
-Every step saves its result, so a second run on the same input only redoes what changed.
-
----
-
-## 6. Outputs
+### 2.4 What a run produces
 
 In `output/<name>/` (photos), `output/<name>_video/` (video) or `output/<name>_lidar/` (LiDAR):
 
 | File | What it is |
 |---|---|
-| `floor_plan.svg` | **The plan.** Open it in a browser. Walls with lengths ± uncertainty, doors, windows, room area, ceiling height, red damage markers and a damage legend |
+| `floor_plan.svg` | **The plan.** Open it in a browser. It shows:<ul><li>walls with lengths ± uncertainty;</li><li>door and window tags, with a "Doors and windows" table underneath;</li><li>room area and ceiling height;</li><li>damage markers and a damage table (video)</li></ul> |
 | `floor_plan.json` | The same plan as data. Every number has `value`, `low`, `high` and `method` (`measured` / `estimated` / `assumed`) |
 | `overlays/` | Each photo or frame with the detected walls, corners, doors and windows drawn on it. Look here first when a plan looks wrong |
 | `damage/` | Video: stills of each damage with a box around it |
@@ -204,30 +197,41 @@ In `output/<name>/` (photos), `output/<name>_video/` (video) or `output/<name>_l
 | `plan_debug.png`, `points.ply` | LiDAR: top view of the point cloud with rooms and openings drawn on it, and the fused point cloud (open in MeshLab or CloudCompare) |
 | `openings/` | LiDAR: video frames with the doors and windows that were found |
 
----
-
-## 7. Troubleshooting
+### 2.5 Troubleshooting runs
 
 | Problem | Fix |
 |---|---|
-| `could not select device driver "nvidia"` / no GPU in Docker | Install the NVIDIA Container Toolkit (Linux) or update Docker Desktop and the NVIDIA driver (Windows). Check with `docker run --rm --gpus all ubuntu nvidia-smi` |
-| `CUDA driver version is insufficient` | Update the NVIDIA driver to 580 or newer |
 | `CUDA out of memory` | Close other GPU programs. Lower `--max-frames` (e.g. 18) |
-| Model download fails with a memory error | Add `HF_HUB_DISABLE_XET=1` to `.env` and run again; downloads resume |
-| `ffmpeg not found` (local setup) | Install ffmpeg, or set `FFMPEG_PATH` in `.env` |
-| `cv2` errors (local setup) | `pip uninstall opencv-python opencv-python-headless`, then `pip install opencv-python-headless==4.10.0.84` |
-| `Not enough walls found in two directions` | The photos or video do not show enough walls. Re-capture following section 4 |
+| `Not enough walls found in two directions` | The photos or video do not show enough walls. Re-capture following the manual |
+| `No Stray Scanner capture … found` | The LiDAR capture is still zipped or nested too deep. Unzip it so `odometry.csv` is inside `src/inputs/lidar/<name>/<code>/` |
 | No damage found in a video | Check `transcript.json`: the damage must be said out loud. Check `damage/` to see what was picked |
 
 ---
 
-## 8. More documentation
+## 3. Reports and analysis
 
+For the full write-up and the accuracy analysis, see:
+
+- **[docs/Walkplan Project Report.docx](docs/Walkplan%20Project%20Report.docx)**: project report covering the approach, architecture, how each tier was built, fixes, known failures and takeaways.
+- **[docs/Walkplan Accuracy Report.pptx](docs/Walkplan%20Accuracy%20Report.pptx)**: accuracy report with the measurements against ground truth.
+
+Technical docs in the repo:
+- [docs/project-report.md](docs/project-report.md): the project report in Markdown
 - [docs/photo-pipeline.md](docs/photo-pipeline.md): how the photo tier works, step by step
 - [docs/video-pipeline.md](docs/video-pipeline.md): video tier, damage and multi-room
 - [docs/lidar-pipeline.md](docs/lidar-pipeline.md): LiDAR tier, room splitting, doors and windows
 - [docs/spec.md](docs/spec.md): project goals and requirements
 - [CLAUDE.md](CLAUDE.md): short code map for developers
+
+---
+
+## 4. Outputs and measurements
+
+All the outputs (floor plans, debug images, point clouds) and the tape/laser measurements used for the accuracy report are in this Google Drive folder:
+
+**https://drive.google.com/drive/folders/1sLxFSPTfwtpSULcIx9zARBCTPJpoI1t9?usp=drive_link**
+
+---
 
 ## Models and licences
 
@@ -235,6 +239,5 @@ These models download automatically on first run:
 - [MapAnything](https://github.com/facebookresearch/map-anything) camera poses: `facebook/map-anything-apache`, Apache 2.0
 - [MoGe-2](https://github.com/microsoft/MoGe) depth: MIT
 - [Grounding DINO](https://huggingface.co/IDEA-Research/grounding-dino-tiny) and [SAM](https://huggingface.co/facebook/sam-vit-base) for doors, windows and damage
-
 
 Project licence: MIT (see [LICENSE](LICENSE)).
