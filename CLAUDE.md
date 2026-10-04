@@ -28,6 +28,7 @@ LiDAR pipeline (one Stray Scanner capture per folder: `rgb.mp4`, `depth/`, `conf
 
 ```
 .venv\Scripts\python.exe src\app.py --lidar src\inputs\lidar\single_scan_with_ceiling [--room-type bedroom] [--redo-lidar] [--no-openings]
+```
 
 `data/` (sample captures, zips) is gitignored.
 

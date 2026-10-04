@@ -487,7 +487,11 @@ class SvgCreator:
         if area_half_width >= 0.05:
             subtitle += f" ±{area_half_width:.1f}"
         if room.ceiling_height is not None:
-            subtitle += f" · h {room.ceiling_height.value:.2f} m"
+            subtitle += f" · ceiling {room.ceiling_height.value:.2f} m"
+            if room.ceiling_height.method != "measured":
+                subtitle += f" ({room.ceiling_height.method})"
+        else:
+            subtitle += " · ceiling not seen"
 
         widest = max(len(title) * 1.25, len(subtitle))
         placer.add(placer.text_box(x, y - 5, "x" * int(widest)))
