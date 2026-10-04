@@ -15,6 +15,7 @@
 
 ## DAY 3
 
+0) Ceiling height?
 1) Complete the ppt for analysis report
 
 2) Create Documentation for the Project
