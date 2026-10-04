@@ -187,7 +187,7 @@ class ImageProcessingService:
             opening_pixels = self.opening_finder.combined_mask(detections, depth["mask"].shape)
 
             analysis = self.photo_measurer.measure(photo_id, image_path, depth, opening_pixels, up_hints[index], floor_hints[index])
-            analysis.geometry.openings = self.opening_measurer.measure(analysis, detections, depth)
+            analysis.geometry.openings = self.opening_measurer.measure(analysis, self.opening_finder.openings_only(detections), depth)
 
             if damage_requests and photo_id in damage_requests:
                 analysis.geometry.damages = self.damage_measurer.measure(analysis, image_rgb, depth, damage_requests[photo_id])

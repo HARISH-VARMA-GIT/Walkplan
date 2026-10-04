@@ -44,8 +44,9 @@ A capture folder holds:
 | Grids | `plan_grid.py` | Builds 5 cm rasters: free space (floor plus flat surfaces below the ceiling), and the lowest and highest wall point per cell for x-facing and y-facing walls (0.15–2.0 m above the floor) |
 | Wall lines | `room_segmenter.py` `WallLineFinder` | 1-D peaks of wall-point positions, found separately for each facing direction. A line counts only if at least 0.4 m of its length has wall points spanning ≥0.8 m in height. This drops sofas, beds and counters |
 | Rooms | `room_segmenter.py` `RoomSegmenter` | **Barrier:** tall-wall cells, plus wall-line runs, plus door-sized gaps (≤1.1 m) closed **only along the wall direction**. Closing only along the wall stops parallel corridor walls from being bridged.<br>**Rooms:** connected free space between barriers becomes rooms. Pieces under 0.8 m² are dropped, and so are areas the camera never entered (balconies seen through glass). Closets under 3 m² only need the camera within 1.5 m.<br>**Outline:** notches (unseen floor under furniture) are filled. The pixel outline is traced, each edge snapped to the nearest wall line within 0.25 m, and small jogs removed (`GeometryLayoutBuilder`) |
-| Doors and windows (camera) | `opening_detector.py` | Picks one low-motion, roughly level keyframe per 0.6 s (at most 300). Each is turned upright using gravity, because Stray videos are stored sideways, and shrunk to 1024 px. Grounding DINO and SAM then run on it (same models as the photo tier). Results are cached in `opening_detections.json`. Up to 40 annotated frames go in `openings/` |
-| Place openings | `opening_placer.py` | The LiDAR depth at the mask picks the wall; if there is no depth, the first wall the centre ray crosses is used. Mask pixel rays are cast onto that wall plane, giving the offset, width and heights. Size checks reuse `VALID_SIZES`, a door must reach the floor, and a window sill must be 0.2–1.6 m. Openings are grouped across frames: each needs 2 views, or a score of 0.5 or more. Windows are kept only on outside walls (no room behind them) and never on top of a door |
+| Doors and windows (camera) | `opening_detector.py` | Picks one low-motion, roughly level keyframe per 0.6 s (at most 300). Each is turned upright using gravity, because Stray videos are stored sideways, and shrunk to 1024 px. Grounding DINO and SAM then run on it with the words "door. window. mirror." (same models as the photo tier). Offering "mirror" next to "window" matters: DINO then labels wall mirrors as mirrors instead of windows. Results are cached in `opening_detections.json` together with the words used, and are redone automatically if the words change. Up to 40 annotated frames go in `openings/` |
+| Place openings | `opening_placer.py` | The LiDAR depth at the mask picks the wall; if there is no depth, the first wall the centre ray crosses is used. Mirrors always use the first wall crossed, because the depth on a mirror is the depth of the reflection. Mask pixel rays are cast onto that wall plane, giving the offset, width and heights. Size checks reuse `VALID_SIZES`, a door must reach the floor, and a window sill must be 0.2–1.6 m. Openings are grouped across frames: each needs 2 views, or a score of 0.5 or more. Openings are clipped to their wall. Windows are kept only on outside walls (no room behind them) and never on top of a door. Mirrors (0.2–3 m wide, not below the floor) are kept apart in `mirrors.json`, and any window or door that overlaps a mirror on the same wall is dropped |
+| Mirrors | `mirror_cleaner.py` | Points behind a mirror whose reflection across the mirror's wall lands within 4 cm of a real point in the room are the mirror's "virtual room". They are removed, and the rooms and openings are found again on the cleaned cloud. Each mirror is listed in the plan notes and drawn in magenta in `plan_debug.png` |
 | Doors (geometry) | `opening_placer.py` `gap_openings` | A wall gap of 0.55–1.05 m with floor visible on both sides and no low wall (which would mean a window) becomes a door, with its width measured from the gap. When it matches a camera door, the camera door takes the gap's width |
 | Plan | `plan_builder.py` | Builds a `FloorPlan`. Wall length uncertainty comes from the spread of the two end lines (±2σ); edges not snapped to a line get ±0.10 m. Wall thickness is the gap to the facing wall of the next room (default 0.12 m). Each room's ceiling comes from its own ceiling points, falling back to the overall ceiling as `estimated`. Doors get `leads_to` and an adjacency entry |
 | Render | `floor_plan_generator`, `debug_drawer.py` | `floor_plan.svg`, plus `plan_debug.png`, a top view of the 1.3–1.9 m wall slice with the floor, camera path, rooms and openings |
@@ -61,6 +62,7 @@ A capture folder holds:
 | `plan_frame.json` | Floor height, wall angle and overall ceiling |
 | `opening_detections.json`, `openings/` | Raw door/window detections and annotated keyframes |
 | `openings.json` | Placed openings before they are turned into plan objects |
+| `mirrors.json` | Mirrors found on the walls (not counted as openings) |
 
 ## 4. Results on the sample captures
 
@@ -80,6 +82,8 @@ Runtime: fusion 15–50 s, door/window search about 5 min for 300 keyframes on a
 - Walk slowly. Fast turns blur the RGB keyframes used to find doors and windows.
 
 ## 6. Limits
+
+- Mirrors are found only when Grounding DINO calls them "mirror" in at least 2 views (or once with a score of 0.5 or more). A mirror it still calls a window or door, such as a full-height wardrobe mirror, is not caught yet.
 
 - Rooms of a multi-room scan are labelled `other` and named `Room 1…`. Room types are not detected yet.
 - Open-plan spaces joined by openings wider than 1.1 m become one room.

@@ -265,7 +265,7 @@ Everything is in `output/<name>/` (photos), `output/<name>_video/` or `output/<n
 | Message / problem | What to do |
 |---|---|
 | `Not enough walls found` (photos/video) | The photos or video did not show enough walls. Re-capture following Part 2 or 3 |
-| `No Stray Scanner capture … found` | The LiDAR folder is still a zip, or it is nested two levels deep. Unzip so that `odometry.csv` sits in `src/inputs/lidar/<name>/<code>/` |
+| `No Stray Scanner capture … found` | The LiDAR folder is still a zip. Unzip it so that `odometry.csv` sits in `src/inputs/lidar/<name>/<code>/` (one extra folder level from "Extract All" is fine) |
 | `Found 2 captures` | Put only one capture folder per `src/inputs/lidar/<name>/` |
 | `CUDA out of memory` | Close other programs using the GPU and run again. For video add `--max-frames 18` |
 | No damage in the video plan | The damage was not said out loud while on screen. Check `transcript.json` |

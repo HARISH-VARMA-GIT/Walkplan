@@ -7,7 +7,8 @@ from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, Sam
 
 DETECTOR_NAME = "IDEA-Research/grounding-dino-tiny"
 SEGMENTER_NAME = "facebook/sam-vit-base"
-OPENING_WORDS = ["door", "window"]
+MIRROR_LABEL = "mirror"
+OPENING_WORDS = ["door", "window", MIRROR_LABEL]
 DUPLICATE_OVERLAP = 0.5
 MAX_BOX_SHARE = 0.4
 MAX_WALL_DISTANCE_M = 0.35
@@ -156,6 +157,15 @@ class OpeningFinder:
             detection["mask"] = self.segmenter.segment(image_rgb, detection["box"])
 
         return detections
+
+    def openings_only(self, detections: list) -> list:
+        openings = []
+
+        for detection in detections:
+            if detection["label"] != MIRROR_LABEL:
+                openings.append(detection)
+
+        return openings
 
     def combined_mask(self, detections: list, shape: tuple) -> np.ndarray:
         combined = np.zeros(shape, dtype=bool)

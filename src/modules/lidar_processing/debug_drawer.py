@@ -12,6 +12,7 @@ CUT_HIGH_M = 1.9
 ROOM_COLORS = [(180, 119, 31), (14, 127, 255), (44, 160, 44), (40, 39, 214), (189, 103, 148), (75, 86, 140), (194, 119, 227), (34, 189, 188)]
 DOOR_COLOR = (40, 160, 40)
 WINDOW_COLOR = (213, 123, 58)
+MIRROR_COLOR = (200, 40, 200)
 
 
 class DebugDrawer:
@@ -33,7 +34,7 @@ class DebugDrawer:
         inside = (pixels[:, 0] >= 0) & (pixels[:, 0] < self.size[0]) & (pixels[:, 1] >= 0) & (pixels[:, 1] < self.size[1])
         image[pixels[inside, 1], pixels[inside, 0]] = color
 
-    def save(self, rooms: list, openings: list, path: str):
+    def save(self, rooms: list, openings: list, mirrors: list, path: str):
         corners = np.array([edge.start for room in rooms for edge in room.edges])
         self.low = corners.min(axis=0) - MARGIN_M
         high = corners.max(axis=0) + MARGIN_M
@@ -57,12 +58,18 @@ class DebugDrawer:
             for edge in room.edges:
                 edges_by_room[(room.index, edge.wall_id)] = edge
 
-        for item in openings:
+        for item in openings + mirrors:
             edge = edges_by_room[(item["room_index"], item["wall_id"])]
             start = edge.start + edge.direction * item["start"]
             end = edge.start + edge.direction * item["end"]
-            color = DOOR_COLOR if item["type"] == "door" else WINDOW_COLOR
             ends = self.pixels(np.array([start, end]))
-            cv2.line(image, tuple(int(value) for value in ends[0]), tuple(int(value) for value in ends[1]), color, 7)
+            cv2.line(image, tuple(int(value) for value in ends[0]), tuple(int(value) for value in ends[1]), self.color_for(item["type"]), 7)
 
         cv2.imwrite(path, image)
+
+    def color_for(self, item_type: str) -> tuple:
+        if item_type == "door":
+            return DOOR_COLOR
+        if item_type == "window":
+            return WINDOW_COLOR
+        return MIRROR_COLOR

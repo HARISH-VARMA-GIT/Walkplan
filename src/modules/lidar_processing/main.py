@@ -3,8 +3,10 @@ import logging
 import os
 
 from modules.floor_plan_generator.main import FloorPlanRenderer
+from modules.image_processing.opening_finder import OPENING_WORDS
 from modules.lidar_processing.capture_reader import StrayCapture
 from modules.lidar_processing.debug_drawer import DebugDrawer
+from modules.lidar_processing.mirror_cleaner import MirrorCleaner
 from modules.lidar_processing.opening_detector import OpeningDetector
 from modules.lidar_processing.opening_placer import OpeningPlacer
 from modules.lidar_processing.plan_builder import LidarPlanBuilder
@@ -28,6 +30,7 @@ class LidarOutputFolder:
         self.plan_frame_path = os.path.join(folder_path, "plan_frame.json")
         self.detections_path = os.path.join(folder_path, "opening_detections.json")
         self.openings_path = os.path.join(folder_path, "openings.json")
+        self.mirrors_path = os.path.join(folder_path, "mirrors.json")
         self.openings_folder = os.path.join(folder_path, "openings")
         self.debug_path = os.path.join(folder_path, "plan_debug.png")
         self.floor_plan_path = os.path.join(folder_path, "floor_plan.json")
@@ -62,14 +65,18 @@ class LidarProcessingService:
         return os.path.isdir(os.path.join(folder_path, "depth"))
 
     def find_capture(self, lidar_path: str) -> str:
+        if not os.path.isdir(lidar_path):
+            raise FileNotFoundError(f"LiDAR folder not found: {lidar_path}")
+
         if self.is_capture(lidar_path):
             return lidar_path
 
-        captures = []
-        for name in sorted(os.listdir(lidar_path)):
-            child = os.path.join(lidar_path, name)
-            if os.path.isdir(child) and self.is_capture(child):
-                captures.append(child)
+        captures = self.captures_below(lidar_path)
+        if not captures:
+            for name in sorted(os.listdir(lidar_path)):
+                child = os.path.join(lidar_path, name)
+                if os.path.isdir(child):
+                    captures.extend(self.captures_below(child))
 
         if not captures:
             raise FileNotFoundError(f"No Stray Scanner capture (odometry.csv, camera_matrix.csv, depth/) found in {lidar_path}")
@@ -77,6 +84,16 @@ class LidarProcessingService:
             raise ValueError(f"Found {len(captures)} captures in {lidar_path}; put one capture per folder: {captures}")
 
         return captures[0]
+
+    def captures_below(self, folder_path: str) -> list:
+        captures = []
+
+        for name in sorted(os.listdir(folder_path)):
+            child = os.path.join(folder_path, name)
+            if os.path.isdir(child) and self.is_capture(child):
+                captures.append(child)
+
+        return captures
 
     def room_name_for(self, lidar_path: str) -> str:
         return os.path.basename(os.path.normpath(lidar_path))
@@ -92,14 +109,44 @@ class LidarProcessingService:
         cloud.save_ply(output.ply_path)
         return cloud
 
+    def cached_detections(self, output: LidarOutputFolder):
+        if not os.path.exists(output.detections_path):
+            return None
+
+        cached = output.load_json(output.detections_path)
+        if not isinstance(cached, dict) or cached.get("words") != OPENING_WORDS:
+            logger.info("Cached detections were made with other words, looking again")
+            return None
+
+        return cached["detections"]
+
     def detect_openings(self, capture: StrayCapture, output: LidarOutputFolder, redo: bool) -> list:
-        if os.path.exists(output.detections_path) and not redo:
-            logger.info("Using cached door and window detections")
-            return output.load_json(output.detections_path)
+        cached = None if redo else self.cached_detections(output)
+        if cached is not None:
+            logger.info("Using cached door, window and mirror detections")
+            return cached
 
         detections = self.opening_detector.detect(capture, output.openings_folder)
-        output.save_json(output.detections_path, detections)
+        output.save_json(output.detections_path, {"words": OPENING_WORDS, "detections": detections})
         return detections
+
+    def find_rooms(self, cloud, frame) -> dict:
+        grid = PlanGrid(cloud, frame)
+        x_lines = self.line_finder.find(grid, 0)
+        y_lines = self.line_finder.find(grid, 1)
+        segmented = self.segmenter.segment(grid, x_lines, y_lines)
+        logger.info("Found %d wall lines and %d rooms", len(x_lines) + len(y_lines), len(segmented["rooms"]))
+
+        return {"grid": grid, "rooms": segmented["rooms"], "door_gaps": segmented["door_gaps"], "notes": list(self.segmenter.notes)}
+
+    def mirror_notes(self, mirrors: list) -> list:
+        notes = []
+
+        for mirror in mirrors:
+            notes.append(f"R{mirror['room_index']}: mirror on {mirror['wall_id']} at {mirror['start']:.2f}–{mirror['end']:.2f} m "
+                         f"({mirror['views']} views), not counted as a window or door")
+
+        return notes
 
     def room_summary(self, room) -> dict:
         return {"id": f"R{room.index}", "area_m2": round(room.area, 2), "walls": len(room.edges)}
@@ -116,25 +163,32 @@ class LidarProcessingService:
         output.save_json(output.plan_frame_path, frame.to_dict())
         logger.info("Floor found, ceiling %s m, walls turned %.1f deg", frame.ceiling_height_m, frame.wall_angle_deg)
 
-        grid = PlanGrid(cloud, frame)
-        x_lines = self.line_finder.find(grid, 0)
-        y_lines = self.line_finder.find(grid, 1)
-        segmented = self.segmenter.segment(grid, x_lines, y_lines)
-        rooms = segmented["rooms"]
-        logger.info("Found %d wall lines and %d rooms", len(x_lines) + len(y_lines), len(rooms))
-
+        found = self.find_rooms(cloud, frame)
         placer = OpeningPlacer(capture, frame)
-        camera_openings = []
+        detections = []
         if find_openings:
-            camera_openings = placer.place(self.detect_openings(capture, output, redo_lidar), rooms)
-        openings = placer.merge(camera_openings, placer.gap_openings(grid, segmented["door_gaps"], rooms))
-        output.save_json(output.openings_path, openings)
+            detections = self.detect_openings(capture, output, redo_lidar)
+        placed = placer.place(detections, found["rooms"])
 
-        builder = LidarPlanBuilder(cloud, frame, grid)
-        plan = builder.build(rooms, openings, capture.name, room_type, self.segmenter.notes)
+        if placed["mirrors"]:
+            cleaned = MirrorCleaner(frame).clean(cloud, placed["mirrors"], found["rooms"])
+            if cleaned["removed"] > 0:
+                cloud = cleaned["cloud"]
+                found = self.find_rooms(cloud, frame)
+                placed = placer.place(detections, found["rooms"])
+
+        rooms = found["rooms"]
+        gap_openings = placer.gap_openings(found["grid"], found["door_gaps"], rooms)
+        openings = placer.merge(placed["openings"], gap_openings, placed["mirrors"])
+        output.save_json(output.openings_path, openings)
+        output.save_json(output.mirrors_path, placed["mirrors"])
+
+        notes = found["notes"] + self.mirror_notes(placed["mirrors"])
+        builder = LidarPlanBuilder(cloud, frame, found["grid"])
+        plan = builder.build(rooms, openings, capture.name, room_type, notes)
         output.save_json(output.floor_plan_path, plan.model_dump(mode="json"))
         self.renderer.save_svg(plan, output.svg_path)
-        DebugDrawer(cloud, frame).save(rooms, openings, output.debug_path)
+        DebugDrawer(cloud, frame).save(rooms, openings, placed["mirrors"], output.debug_path)
 
         return {
             "capture_path": capture_path,

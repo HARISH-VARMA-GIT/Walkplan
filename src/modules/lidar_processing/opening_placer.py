@@ -1,6 +1,6 @@
 import numpy as np
 
-from modules.image_processing.opening_finder import VALID_SIZES
+from modules.image_processing.opening_finder import MIRROR_LABEL, VALID_SIZES
 from modules.lidar_processing.capture_reader import StrayCapture
 from modules.lidar_processing.plan_frame import PlanFrame
 from modules.lidar_processing.plan_grid import CELL_SIZE_M, PlanGrid
@@ -26,6 +26,10 @@ DEFAULT_MAX_TOP_M = 2.9
 TOP_ALLOWANCE_M = 0.1
 WINDOW_JOIN_GAP_M = 0.15
 OUTSIDE_REACH_M = 0.45
+MIRROR_SIZES = {"width": (0.2, 3.0), "height": (0.3, 2.6)}
+MIRROR_COVER_SHARE = 0.3
+MIN_CLIPPED_WIDTH_M = 0.2
+MIRROR_FLOOR_SLACK_M = 0.15
 
 
 class OpeningPlacer:
@@ -96,7 +100,7 @@ class OpeningPlacer:
 
         centre_ray = rays.mean(axis=0)
         chosen = None
-        if detection["median_depth"] is not None:
+        if detection["median_depth"] is not None and detection["label"] != MIRROR_LABEL:
             centre_point = self.frame.to_plan(pose.to_world(centre_ray * detection["median_depth"]))
             chosen = self.wall_near_point(rooms, centre_point, camera)
         if chosen is None:
@@ -131,6 +135,7 @@ class OpeningPlacer:
             "top": top,
             "score": detection["score"],
             "frame_index": detection["frame_index"],
+            "wall_length": edge.length,
             "valid": self.is_valid(detection, far - near, bottom, top),
         }
 
@@ -138,7 +143,10 @@ class OpeningPlacer:
         if detection["cut_at_edge"]:
             return False
 
-        limits = VALID_SIZES[detection["label"]]
+        if detection["label"] == MIRROR_LABEL:
+            limits = MIRROR_SIZES
+        else:
+            limits = VALID_SIZES[detection["label"]]
         height = top if detection["label"] == "door" else top - bottom
 
         if not limits["width"][0] <= width <= limits["width"][1]:
@@ -148,6 +156,8 @@ class OpeningPlacer:
 
         if top > self.max_top:
             return False
+        if detection["label"] == MIRROR_LABEL:
+            return bottom > -MIRROR_FLOOR_SLACK_M
         if detection["label"] == "door":
             return bottom < DOOR_FLOOR_GAP_M
         return MIN_WINDOW_SILL_M < bottom < MAX_WINDOW_SILL_M
@@ -172,7 +182,9 @@ class OpeningPlacer:
                     continue
 
                 if len(group) >= MIN_VIEWS or max(member["score"] for member in group) >= SINGLE_VIEW_SCORE:
-                    openings.append(self.summarise(room_index, wall_id, opening_type, group))
+                    summary = self.summarise(room_index, wall_id, opening_type, group)
+                    if summary is not None:
+                        openings.append(summary)
                 group = [item] if item is not None else []
 
         return openings
@@ -184,12 +196,17 @@ class OpeningPlacer:
         tops = [member["top"] for member in group]
         bottoms = [member["bottom"] for member in group]
 
+        start = max(float(np.median(starts)), 0.0)
+        end = min(float(np.median(ends)), group[0]["wall_length"])
+        if end - start < max(MIN_CLIPPED_WIDTH_M, 0.5 * float(np.median(widths))):
+            return None
+
         return {
             "room_index": room_index,
             "wall_id": wall_id,
             "type": opening_type,
-            "start": float(np.median(starts)),
-            "end": float(np.median(ends)),
+            "start": start,
+            "end": end,
             "width_spread": float(np.std(widths)) if len(widths) > 1 else 0.05,
             "top": float(np.median(tops)),
             "bottom": float(np.median(bottoms)),
@@ -204,7 +221,8 @@ class OpeningPlacer:
 
         for item in sorted(openings, key=self.start_of):
             last = joined[-1] if joined else None
-            same_wall = last is not None and last["type"] == "window" and item["type"] == "window" and                 last["room_index"] == item["room_index"] and last["wall_id"] == item["wall_id"]
+            both_windows = last is not None and last["type"] == "window" and item["type"] == "window"
+            same_wall = both_windows and last["room_index"] == item["room_index"] and last["wall_id"] == item["wall_id"]
 
             if same_wall and item["start"] - last["end"] < WINDOW_JOIN_GAP_M:
                 last["end"] = max(last["end"], item["end"])
@@ -254,13 +272,38 @@ class OpeningPlacer:
 
         return kept
 
-    def place(self, detections: list, rooms: list) -> list:
+    def is_on_mirror(self, item: dict, mirrors: list) -> bool:
+        for mirror in mirrors:
+            same_wall = mirror["room_index"] == item["room_index"] and mirror["wall_id"] == item["wall_id"]
+            smaller = min(mirror["end"] - mirror["start"], item["end"] - item["start"])
+            if same_wall and self.shared_length(mirror, item) > MIRROR_COVER_SHARE * smaller:
+                return True
+        return False
+
+    def not_on_mirrors(self, openings: list, mirrors: list) -> list:
+        kept = []
+
+        for item in openings:
+            if not self.is_on_mirror(item, mirrors):
+                kept.append(item)
+
+        return kept
+
+    def place(self, detections: list, rooms: list) -> dict:
         placed = []
         for detection in detections:
             placed.append(self.place_one(detection, rooms))
 
-        openings = self.outside_windows_only(self.cluster(placed), rooms)
-        return self.join_windows(self.windows_not_on_doors(openings))
+        mirrors = []
+        openings = []
+        for item in self.cluster(placed):
+            if item["type"] == MIRROR_LABEL:
+                mirrors.append(item)
+            else:
+                openings.append(item)
+
+        openings = self.not_on_mirrors(self.outside_windows_only(openings, rooms), mirrors)
+        return {"openings": self.join_windows(self.windows_not_on_doors(openings)), "mirrors": mirrors}
 
     def free_across(self, grid: PlanGrid, gap: dict) -> bool:
         axis = gap["axis"]
@@ -336,10 +379,10 @@ class OpeningPlacer:
         same_wall = first["room_index"] == second["room_index"] and first["wall_id"] == second["wall_id"]
         return same_wall and abs(self.centre_of(first) - self.centre_of(second)) < SAME_OPENING_M
 
-    def merge(self, camera_openings: list, gap_openings: list) -> list:
+    def merge(self, camera_openings: list, gap_openings: list, mirrors: list) -> list:
         merged = list(camera_openings)
 
-        for gap_opening in gap_openings:
+        for gap_opening in self.not_on_mirrors(gap_openings, mirrors):
             match = None
             for opening in merged:
                 if self.overlaps(opening, gap_opening):
