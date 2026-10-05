@@ -71,7 +71,7 @@ class ImageProcessingService:
             model_env_name="LLM_VISION_MODEL_CHAIN",
             default_models="gpt-4o-mini,gpt-4o",
             timeout=60,
-            max_tokens=2048,
+            max_tokens=10240,
         )
         self.vision_limiter = VisionLimiter()
         self.vision_model_name = os.getenv("VISION_MODEL_NAME")
